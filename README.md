@@ -8,6 +8,8 @@
 
 UniversalBeat is a genre-agnostic rhythm game system plugin that provides precise beat tracking and timing accuracy evaluation for player inputs. Designers can configure BPM, check input timing via Blueprint, and bind to event dispatchers for rhythm-based feedback systems.
 
+![example](Resources/binding.png)
+
 ## Features
 
 - ✅ **BPM-based Beat Tracking** - Set tempo, system tracks beats automatically
@@ -53,10 +55,7 @@ Else → "Miss!"
 
 ## Example Assets
 
-Check `Content/Blueprints/Examples/` for:
-- `BP_RhythmGameExample` - Complete rhythm mechanic implementation
-- `WBP_TimingFeedback` - UI widget for timing display
-- `WBP_CalibrationUI` - Player calibration interface
+Check `Content/Blueprints" for quick start example 
 
 ## Target Performance
 
