@@ -1,0 +1,30 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "UniversalBeat Rhythm System",
+	"Description": "Genre-agnostic rhythm game system providing precise beat tracking, timing accuracy evaluation, and event-driven integration for Blueprint-based rhythm mechanics.",
+	"Category": "Gameplay",
+	"CreatedBy": "Nguyen Phi Hung",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": true,
+	"Modules": [
+		{
+			"Name": "UniversalBeat",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [],
+			"PlatformDenyList": [],
+			"TargetAllowList": [],
+			"TargetDenyList": [],
+			"AdditionalDependencies": []
+		}
+	],
+	"Plugins": []
+}
