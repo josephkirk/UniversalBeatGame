@@ -791,9 +791,9 @@ bool UUniversalBeatSubsystem::UnregisterSong(FGameplayTag SongTag)
 	return true;
 }
 
-bool UUniversalBeatSubsystem::PlaySongByTag(FGameplayTag SongTag)
+
+bool UUniversalBeatSubsystem::PlaySongByTag(FGameplayTag SongTag, bool bQueue)
 {
-	// TODO: Implement in Phase 8 (User Story 6)
 	TObjectPtr<USongConfiguration>* FoundSong = RegisteredSongs.Find(SongTag);
 	if (!FoundSong || !*FoundSong)
 	{
@@ -801,21 +801,37 @@ bool UUniversalBeatSubsystem::PlaySongByTag(FGameplayTag SongTag)
 		return false;
 	}
 	
-	// Stop current song if any
-	if (CurrentlyPlayingSong)
+	// If not queuing, clear existing queue and stop current song
+	if (!bQueue)
 	{
-		StopCurrentSong();
+		// Empty the queue
+		while (!QueuedSongs.IsEmpty())
+		{
+			TObjectPtr<USongConfiguration> Dummy;
+			QueuedSongs.Dequeue(Dummy);
+		}
+		
+		// Stop current song if any
+		if (CurrentlyPlayingSong)
+		{
+			StopCurrentSong();
+		}
 	}
 	
-	CurrentlyPlayingSong = *FoundSong;
-	
-	// Broadcast OnSongStarted event
-	OnSongStarted.Broadcast(SongTag);
+	// Enqueue the song
+	QueuedSongs.Enqueue(*FoundSong);
 	
 	if (bDebugLoggingEnabled)
 	{
-		UE_LOG(LogUniversalBeat, Log, TEXT("PlaySongByTag: Started song '%s' with tag '%s'"), 
-			*CurrentlyPlayingSong->GetSongLabel(), *SongTag.ToString());
+		UE_LOG(LogUniversalBeat, Log, TEXT("PlaySongByTag: %s song '%s' with tag '%s'"), 
+			bQueue ? TEXT("Queued") : TEXT("Playing"), 
+			*(*FoundSong)->GetSongLabel(), *SongTag.ToString());
+	}
+	
+	// If nothing is currently playing, start the queue
+	if (!CurrentlyPlayingSong)
+	{
+		PlaySong();
 	}
 	
 	return true;
@@ -829,20 +845,80 @@ void UUniversalBeatSubsystem::StopCurrentSong()
 		return;
 	}
 	
-	FGameplayTag StoppedSongTag = CurrentlyPlayingSong->GetSongTag();
+	// Store reference to song before cleanup
+	TObjectPtr<USongConfiguration> StoppedSong = CurrentlyPlayingSong;
 	
 	// Clean up playback state
 	CleanupSongPlayback();
 	
 	CurrentlyPlayingSong = nullptr;
 	
-	// Broadcast OnSongEnded event
-	OnSongEnded.Broadcast(StoppedSongTag);
+	// Broadcast OnSongEnded event with the song configuration
+	OnSongEnded.Broadcast();
 	
 	if (bDebugLoggingEnabled)
 	{
-		UE_LOG(LogUniversalBeat, Log, TEXT("StopCurrentSong: Stopped song with tag '%s'"), *StoppedSongTag.ToString());
+		UE_LOG(LogUniversalBeat, Log, TEXT("StopCurrentSong: Stopped song '%s' with tag '%s'"), 
+			*StoppedSong->GetSongLabel(), *StoppedSong->GetSongTag().ToString());
 	}
+}
+
+void UUniversalBeatSubsystem::PlaySong()
+{
+	// Dequeue next song from queue
+	TObjectPtr<USongConfiguration> NextSong;
+	if (!QueuedSongs.Dequeue(NextSong) || !NextSong)
+	{
+		if (bDebugLoggingEnabled)
+		{
+			UE_LOG(LogUniversalBeat, Log, TEXT("PlaySong: No more songs in queue"));
+		}
+		return;
+	}
+	
+	CurrentlyPlayingSong = NextSong;
+	
+	// Broadcast OnSongStarted event with the song configuration
+	OnSongStarted.Broadcast();
+	
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("PlaySong: Started song '%s' with tag '%s'"), 
+			*CurrentlyPlayingSong->GetSongLabel(), *CurrentlyPlayingSong->GetSongTag().ToString());
+	}
+	
+	// Validate tracks exist
+	const TArray<FNoteTrackEntry>& Tracks = CurrentlyPlayingSong->Tracks;
+	if (Tracks.Num() == 0)
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("PlaySong: Song '%s' has no tracks configured"), 
+			*CurrentlyPlayingSong->GetSongTag().ToString());
+		CurrentlyPlayingSong = nullptr;
+		// Try next song in queue
+		PlaySong();
+		return;
+	}
+	
+	// Clear track queue and enqueue all tracks from this song
+	while (!QueuedTracks.IsEmpty())
+	{
+		FNoteTrackEntry Dummy;
+		QueuedTracks.Dequeue(Dummy);
+	}
+	
+	for (const FNoteTrackEntry& Track : Tracks)
+	{
+		QueuedTracks.Enqueue(Track);
+	}
+	
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("PlaySong: Enqueued %d tracks for song '%s'"), 
+			Tracks.Num(), *CurrentlyPlayingSong->GetSongTag().ToString());
+	}
+	
+	// Start playing tracks
+	PlayTrack();
 }
 
 USongConfiguration* UUniversalBeatSubsystem::GetCurrentSong() const
@@ -853,9 +929,11 @@ USongConfiguration* UUniversalBeatSubsystem::GetCurrentSong() const
 TArray<ULevelSequencePlayer*> UUniversalBeatSubsystem::GetActiveTracks() const
 {
 	TArray<ULevelSequencePlayer*> Result;
-	for (ULevelSequencePlayer* Player : ActiveTrackPlayers)
+	// With sequential playback, return the single SongPlayer if a song is playing
+	if (CurrentlyPlayingSong)
 	{
-		if (IsValid(Player))
+		ULevelSequencePlayer* Player = GetSongPlayer();
+		if (Player && Player->IsPlaying())
 		{
 			Result.Add(Player);
 		}
@@ -865,74 +943,293 @@ TArray<ULevelSequencePlayer*> UUniversalBeatSubsystem::GetActiveTracks() const
 
 bool UUniversalBeatSubsystem::IsPlayingSong() const
 {
-	return CurrentlyPlayingSong != nullptr && ActiveTrackPlayers.Num() > 0;
+	if (!CurrentlyPlayingSong)
+	{
+		return false;
+	}
+	
+	ULevelSequencePlayer* Player = GetSongPlayer();
+	return Player && Player->IsPlaying();
 }
 
 // Helper function implementations (stubs)
 
 void UUniversalBeatSubsystem::CleanupSongPlayback()
 {
-	// TODO: Implement in Phase 8 (User Story 6)
-	// Stop all active players
-	for (ULevelSequencePlayer* Player : ActiveTrackPlayers)
+	// Stop SongPlayer if playing
+	ULevelSequencePlayer* Player = GetSongPlayer();
+	if (Player && Player->IsPlaying())
 	{
-		if (IsValid(Player))
-		{
-			Player->Stop();
-		}
+		Player->Stop();
 	}
-	ActiveTrackPlayers.Empty();
 	
-	// Clear all timers
+	// Clear delay timer
 	if (UWorld* World = GetWorld())
 	{
-		for (FTimerHandle& Handle : TrackDelayTimers)
+		if (TrackDelayTimer.IsValid())
 		{
-			World->GetTimerManager().ClearTimer(Handle);
+			World->GetTimerManager().ClearTimer(TrackDelayTimer);
+			TrackDelayTimer.Invalidate();
 		}
 	}
-	TrackDelayTimers.Empty();
-	LoopingTracks.Empty();
-	CompletedTracks.Empty();
+	
+	// Clear track queue
+	while (!QueuedTracks.IsEmpty())
+	{
+		FNoteTrackEntry Dummy;
+		QueuedTracks.Dequeue(Dummy);
+	}
+	
+	// Reset current track info
+	CurrentTrackInfo = FNoteTrackEntry();
+	
+	// Clear current song
+	CurrentlyPlayingSong = nullptr;
+	
+	// Clear note chart
+	ClearNoteChart();
 }
 
-void UUniversalBeatSubsystem::StartTrackWithDelay(int32 TrackIndex, float DelaySeconds)
+void UUniversalBeatSubsystem::PlayTrack()
 {
-	// TODO: Implement in Phase 8 (User Story 6)
+	// Dequeue next track
+	if (!QueuedTracks.Dequeue(CurrentTrackInfo))
+	{
+		// No more tracks in queue - check song completion
+		if (bDebugLoggingEnabled)
+		{
+			UE_LOG(LogUniversalBeat, Log, TEXT("PlayTrack: No more tracks in queue, checking song completion"));
+		}
+		CheckSongCompletion();
+		return;
+	}
+	
+	// Validate track sequence
+	ULevelSequence* TrackSequence = CurrentTrackInfo.TrackSequence.LoadSynchronous();
+	if (!TrackSequence)
+	{
+		UE_LOG(LogUniversalBeat, Error, TEXT("PlayTrack: Failed to load track sequence"));
+		// Try next track
+		PlayTrack();
+		return;
+	}
+	
 	if (bDebugLoggingEnabled)
 	{
-		UE_LOG(LogUniversalBeat, Log, TEXT("StartTrackWithDelay: Track %d, Delay %.2fs"), TrackIndex, DelaySeconds);
+		UE_LOG(LogUniversalBeat, Log, TEXT("PlayTrack: Starting track with delay %.2fs, loop=%s"), 
+			CurrentTrackInfo.DelayOffset, 
+			CurrentTrackInfo.bLoopTrack ? TEXT("true") : TEXT("false"));
+	}
+	
+	// Apply delay if needed
+	if (CurrentTrackInfo.DelayOffset > 0.0f)
+	{
+		StartTrackWithDelay(CurrentTrackInfo.DelayOffset);
+	}
+	else
+	{
+		OnTrackDelayComplete();
 	}
 }
 
-void UUniversalBeatSubsystem::OnTrackDelayComplete(int32 TrackIndex)
+void UUniversalBeatSubsystem::StartTrackWithDelay(float DelaySeconds)
 {
-	// TODO: Implement in Phase 8 (User Story 6)
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		UE_LOG(LogUniversalBeat, Error, TEXT("StartTrackWithDelay: No valid world"));
+		return;
+	}
+
 	if (bDebugLoggingEnabled)
 	{
-		UE_LOG(LogUniversalBeat, Log, TEXT("OnTrackDelayComplete: Track %d"), TrackIndex);
+		UE_LOG(LogUniversalBeat, Log, TEXT("StartTrackWithDelay: Delay %.2fs"), DelaySeconds);
+	}
+
+	// Clear previous timer if any
+	if (TrackDelayTimer.IsValid())
+	{
+		World->GetTimerManager().ClearTimer(TrackDelayTimer);
+	}
+
+	// Create timer for delayed start
+	FTimerDelegate TimerDelegate;
+	TimerDelegate.BindUObject(this, &UUniversalBeatSubsystem::OnTrackDelayComplete);
+	
+	World->GetTimerManager().SetTimer(TrackDelayTimer, TimerDelegate, DelaySeconds, false);
+}
+
+void UUniversalBeatSubsystem::OnTrackDelayComplete()
+{
+	if (!CurrentlyPlayingSong)
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("OnTrackDelayComplete: No song playing"));
+		return;
+	}
+
+	// Load the track sequence asset from CurrentTrackInfo
+	ULevelSequence* TrackSequence = CurrentTrackInfo.TrackSequence.LoadSynchronous();
+	if (!TrackSequence)
+	{
+		UE_LOG(LogUniversalBeat, Error, TEXT("OnTrackDelayComplete: Failed to load track sequence"));
+		// Try next track
+		PlayTrack();
+		return;
+	}
+
+	// Ensure SongPlayerActor exists
+	EnsureSongPlayerActor();
+	if (!SongPlayerActor)
+	{
+		UE_LOG(LogUniversalBeat, Error, TEXT("OnTrackDelayComplete: No valid SongPlayerActor"));
+		return;
+	}
+
+	// Sequential playback using single SongPlayerActor
+	// Set the sequence for this track
+	SongPlayerActor->SetSequence(TrackSequence);
+	
+	ULevelSequencePlayer* Player = GetSongPlayer();
+	if (!Player)
+	{
+		UE_LOG(LogUniversalBeat, Error, TEXT("OnTrackDelayComplete: Failed to get player"));
+		return;
+	}
+
+	// Load note chart from the sequence for validation
+	LoadNoteChartFromSequence(TrackSequence);
+
+	// Clear any previous finish bindings and bind our callback
+	Player->OnFinished.Clear();
+	Player->OnFinished.AddDynamic(this, &UUniversalBeatSubsystem::OnSongPlayerFinished);
+
+	// Start playback
+	Player->Play();
+
+	// Find track index for broadcasting (search in original song tracks)
+	int32 TrackIndex = 0;
+	if (CurrentlyPlayingSong)
+	{
+		for (int32 i = 0; i < CurrentlyPlayingSong->Tracks.Num(); ++i)
+		{
+			if (CurrentlyPlayingSong->Tracks[i].TrackSequence == CurrentTrackInfo.TrackSequence)
+			{
+				TrackIndex = i;
+				break;
+			}
+		}
+		
+		// Broadcast track started event
+		OnTrackStarted.Broadcast(TrackIndex);
+	}
+
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("OnTrackDelayComplete: Track %d started playback"), TrackIndex);
 	}
 }
 
-void UUniversalBeatSubsystem::OnTrackSequenceFinished(int32 TrackIndex)
+void UUniversalBeatSubsystem::OnTrackSequenceFinished()
 {
-	// TODO: Implement in Phase 8 (User Story 6)
+	if (!CurrentlyPlayingSong)
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("OnTrackSequenceFinished: No song playing"));
+		return;
+	}
+
 	if (bDebugLoggingEnabled)
 	{
-		UE_LOG(LogUniversalBeat, Log, TEXT("OnTrackSequenceFinished: Track %d"), TrackIndex);
+		UE_LOG(LogUniversalBeat, Log, TEXT("OnTrackSequenceFinished: Track finished"));
 	}
+
+	// Check if this track should loop
+	if (CurrentTrackInfo.bLoopTrack)
+	{
+		// Track is configured to loop - restart playback
+		ULevelSequencePlayer* Player = GetSongPlayer();
+		if (Player)
+		{
+			Player->Stop();
+			Player->Play();
+			if (bDebugLoggingEnabled)
+			{
+				UE_LOG(LogUniversalBeat, Log, TEXT("OnTrackSequenceFinished: Track restarting (loop)"));
+			}
+		}
+	}
+	else
+	{
+		// Non-looping track completed
+		// Find track index for broadcasting
+		int32 TrackIndex = 0;
+		if (CurrentlyPlayingSong)
+		{
+			for (int32 i = 0; i < CurrentlyPlayingSong->Tracks.Num(); ++i)
+			{
+				if (CurrentlyPlayingSong->Tracks[i].TrackSequence == CurrentTrackInfo.TrackSequence)
+				{
+					TrackIndex = i;
+					break;
+				}
+			}
+			
+			// Broadcast track ended event
+			OnTrackEnded.Broadcast(TrackIndex);
+		}
+
+		if (bDebugLoggingEnabled)
+		{
+			UE_LOG(LogUniversalBeat, Log, TEXT("OnTrackSequenceFinished: Track %d completed, playing next"), TrackIndex);
+		}
+
+		// Play next track from queue (or complete song if queue empty)
+		PlayTrack();
+	}
+}
+
+void UUniversalBeatSubsystem::OnSongPlayerFinished()
+{
+	// Delegate to the track-specific handler
+	OnTrackSequenceFinished();
 }
 
 bool UUniversalBeatSubsystem::CheckSongCompletion() const
 {
-	// TODO: Implement in Phase 8 (User Story 6)
+	if (!CurrentlyPlayingSong)
+	{
+		return false;
+	}
+
+	// Song is complete when track queue is empty and no track is playing
+	if (QueuedTracks.IsEmpty())
+	{
+		if (bDebugLoggingEnabled)
+		{
+			UE_LOG(LogUniversalBeat, Log, TEXT("CheckSongCompletion: Song '%s' completed"), 
+				*CurrentlyPlayingSong->GetSongLabel());
+		}
+
+		// Store reference to completed song before cleanup
+		TObjectPtr<USongConfiguration> CompletedSong = CurrentlyPlayingSong;
+		
+		// Broadcast song ended with the song configuration
+		OnSongEnded.Broadcast();
+		
+		// Clean up current song
+		const_cast<UUniversalBeatSubsystem*>(this)->CleanupSongPlayback();
+		
+		// Try to play next song in queue
+		const_cast<UUniversalBeatSubsystem*>(this)->PlaySong();
+		
+		return true;
+	}
+
 	return false;
 }
 
 // ====================================================================
 // Note Chart System Implementation (moved from UNoteChartDirector)
 // ====================================================================
-
 bool UUniversalBeatSubsystem::LoadNoteChartFromSequence(ULevelSequence* Sequence)
 {
 	if (!Sequence)
@@ -1277,7 +1574,7 @@ void UUniversalBeatSubsystem::EnsureSongPlayerActor()
 
 ULevelSequencePlayer* UUniversalBeatSubsystem::GetSongPlayer() const
 {
-
+	check(IsValid(SongPlayerActor));
 
 	return SongPlayerActor->GetSequencePlayer();
 }

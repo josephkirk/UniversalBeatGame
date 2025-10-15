@@ -22,10 +22,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBeat, FBeatEventData, BeatData);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCalibrationComplete, float, CalculatedOffsetMs, bool, bSuccess);
 
 // Note chart system event delegates
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSongStarted, FGameplayTag, SongTag);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSongEnded, FGameplayTag, SongTag);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTrackStarted, FGameplayTag, SongTag, int32, TrackIndex);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTrackEnded, FGameplayTag, SongTag, int32, TrackIndex);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSongStarted);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSongEnded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTrackStarted, int32, TrackIndex);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTrackEnded, int32, TrackIndex);
 
 /**
  * UniversalBeat Subsystem - Game thread only
@@ -278,13 +278,13 @@ public:
 
 	/**
 	 * Play a registered song by its gameplay tag.
-	 * Stops current song if any is playing.
 	 * 
 	 * @param SongTag Gameplay tag of the song to play
-	 * @return True if song was found and started successfully
+	 * @param bQueue If true, enqueue song after current. If false, clear queue and play immediately.
+	 * @return True if song was found and queued/started successfully
 	 */
-	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Play registered song by tag. Stops current song if any."))
-	bool PlaySongByTag(FGameplayTag SongTag);
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Play registered song by tag. Queue=true adds to playlist, Queue=false plays immediately."))
+	bool PlaySongByTag(FGameplayTag SongTag, bool bQueue = false);
 
 	/**
 	 * Stop the currently playing song.
@@ -390,14 +390,14 @@ public:
 
 	/**
 	 * Event fired when a song starts playing.
-	 * Receives the song's gameplay tag identifier.
+	 * Receives the song configuration asset.
 	 */
 	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
 	FOnSongStarted OnSongStarted;
 
 	/**
 	 * Event fired when a song ends (all non-looping tracks complete).
-	 * Receives the song's gameplay tag identifier.
+	 * Receives the song configuration asset.
 	 */
 	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
 	FOnSongEnded OnSongEnded;
@@ -478,22 +478,21 @@ private:
 	UPROPERTY()
 	TMap<FGameplayTag, TObjectPtr<USongConfiguration>> RegisteredSongs;
 
+	/** Queue of songs to play */
+	TQueue<TObjectPtr<USongConfiguration>> QueuedSongs;
+
+	/** Queue of tracks from current song to play sequentially */
+	TQueue<FNoteTrackEntry> QueuedTracks;
+
 	/** Currently playing song configuration */
 	UPROPERTY()
 	TObjectPtr<USongConfiguration> CurrentlyPlayingSong = nullptr;
 
-	/** Active level sequence players for current song tracks */
-	UPROPERTY()
-	TArray<TObjectPtr<ULevelSequencePlayer>> ActiveTrackPlayers;
+	/** Currently playing track info */
+	FNoteTrackEntry CurrentTrackInfo;
 
-	/** Timer handles for delayed track starts */
-	TArray<FTimerHandle> TrackDelayTimers;
-
-	/** Track indices that are set to loop */
-	TSet<int32> LoopingTracks;
-
-	/** Track indices that have completed (for song end detection) */
-	TSet<int32> CompletedTracks;
+	/** Timer handle for delayed track start */
+	FTimerHandle TrackDelayTimer;
 
 	// Note Chart Tracking (moved from UNoteChartDirector)
 
@@ -554,15 +553,25 @@ private:
 	/** Clean up song playback state */
 	void CleanupSongPlayback();
 
+	/** Dequeue and play next song from queue */
+	void PlaySong();
+
+	/** Dequeue and play next track from current song */
+	void PlayTrack();
+
 	/** Start a track with delay */
-	void StartTrackWithDelay(int32 TrackIndex, float DelaySeconds);
+	void StartTrackWithDelay(float DelaySeconds);
 
 	/** Callback when a track delay timer expires */
-	void OnTrackDelayComplete(int32 TrackIndex);
+	void OnTrackDelayComplete();
 
 	/** Callback when a track sequence finishes */
 	UFUNCTION()
-	void OnTrackSequenceFinished(int32 TrackIndex);
+	void OnTrackSequenceFinished();
+	
+	/** Callback when SongPlayerActor finishes (delegates to OnTrackSequenceFinished) */
+	UFUNCTION()
+	void OnSongPlayerFinished();
 
 	/** Check if all non-looping tracks have completed */
 	bool CheckSongCompletion() const;
