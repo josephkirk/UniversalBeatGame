@@ -3,6 +3,11 @@
 #include "UniversalBeatSubsystem.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "SongConfiguration.h"
+#include "NoteDataAsset.h"
+#include "LevelSequence.h"
+#include "LevelSequencePlayer.h"
+#include "UniversalBeatFunctionLibrary.h"
 
 // Logging category
 DEFINE_LOG_CATEGORY_STATIC(LogUniversalBeat, Log, All);
@@ -129,11 +134,7 @@ float UUniversalBeatSubsystem::CheckBeatTimingByLabel(FName LabelName)
 	return CheckBeatTimingInternal(LabelName, FGameplayTag());
 }
 
-float UUniversalBeatSubsystem::CheckBeatTimingByTag(FGameplayTag InputTag)
-{
-	// T022: Check timing with tag identifier
-	return CheckBeatTimingInternal(NAME_None, InputTag);
-}
+
 
 void UUniversalBeatSubsystem::SetTimingCurve(UCurveFloat* NewCurve)
 {
@@ -615,5 +616,218 @@ bool UUniversalBeatSubsystem::IsPausedState() const
 	{
 		return World->GetWorldSettings()->TimeDilation == 0.0f;
 	}
+	return false;
+}
+
+// ====================================================================
+// Note Chart System Implementation (Stub implementations for Phase 2)
+// ====================================================================
+
+FNoteValidationResult UUniversalBeatSubsystem::CheckBeatTimingByTag(FGameplayTag InputTag)
+{
+	// TODO: Implement in Phase 6 (User Story 2)
+	// For now, fall back to standard beat timing
+	FNoteValidationResult Result;
+	Result.bHit = false;
+	Result.Accuracy = CheckBeatTimingInternal(NAME_None, InputTag);
+	Result.TimingDirection = ENoteTimingDirection::OnTime;
+	Result.NoteTag = InputTag;
+	Result.InputTimestamp = FPlatformTime::Seconds();
+	
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("CheckBeatTimingByTag: Tag=%s, Accuracy=%.3f (fallback to standard timing)"), 
+			*InputTag.ToString(), Result.Accuracy);
+	}
+	
+	return Result;
+}
+
+bool UUniversalBeatSubsystem::RegisterSong(USongConfiguration* SongConfig)
+{
+	// TODO: Implement in Phase 8 (User Story 6)
+	if (!SongConfig || !SongConfig->GetSongTag().IsValid())
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("RegisterSong: Invalid song configuration"));
+		return false;
+	}
+	
+	if (RegisteredSongs.Contains(SongConfig->GetSongTag()))
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("RegisterSong: Song with tag '%s' already registered"), 
+			*SongConfig->GetSongTag().ToString());
+		return false;
+	}
+	
+	RegisteredSongs.Add(SongConfig->GetSongTag(), SongConfig);
+	
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("RegisterSong: Registered song '%s' with tag '%s'"), 
+			*SongConfig->GetSongLabel(), *SongConfig->GetSongTag().ToString());
+	}
+	
+	return true;
+}
+
+bool UUniversalBeatSubsystem::UnregisterSong(FGameplayTag SongTag)
+{
+	// TODO: Implement in Phase 8 (User Story 6)
+	if (!RegisteredSongs.Contains(SongTag))
+	{
+		return false;
+	}
+	
+	// Stop the song if it's currently playing
+	if (CurrentlyPlayingSong && CurrentlyPlayingSong->GetSongTag() == SongTag)
+	{
+		StopCurrentSong();
+	}
+	
+	RegisteredSongs.Remove(SongTag);
+	
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("UnregisterSong: Removed song with tag '%s'"), *SongTag.ToString());
+	}
+	
+	return true;
+}
+
+bool UUniversalBeatSubsystem::PlaySongByTag(FGameplayTag SongTag)
+{
+	// TODO: Implement in Phase 8 (User Story 6)
+	TObjectPtr<USongConfiguration>* FoundSong = RegisteredSongs.Find(SongTag);
+	if (!FoundSong || !*FoundSong)
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("PlaySongByTag: Song with tag '%s' not found"), *SongTag.ToString());
+		return false;
+	}
+	
+	// Stop current song if any
+	if (CurrentlyPlayingSong)
+	{
+		StopCurrentSong();
+	}
+	
+	CurrentlyPlayingSong = *FoundSong;
+	
+	// Broadcast OnSongStarted event
+	OnSongStarted.Broadcast(SongTag);
+	
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("PlaySongByTag: Started song '%s' with tag '%s'"), 
+			*CurrentlyPlayingSong->GetSongLabel(), *SongTag.ToString());
+	}
+	
+	return true;
+}
+
+void UUniversalBeatSubsystem::StopCurrentSong()
+{
+	// TODO: Implement in Phase 8 (User Story 6)
+	if (!CurrentlyPlayingSong)
+	{
+		return;
+	}
+	
+	FGameplayTag StoppedSongTag = CurrentlyPlayingSong->GetSongTag();
+	
+	// Clean up playback state
+	CleanupSongPlayback();
+	
+	CurrentlyPlayingSong = nullptr;
+	
+	// Broadcast OnSongEnded event
+	OnSongEnded.Broadcast(StoppedSongTag);
+	
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("StopCurrentSong: Stopped song with tag '%s'"), *StoppedSongTag.ToString());
+	}
+}
+
+USongConfiguration* UUniversalBeatSubsystem::GetCurrentSong() const
+{
+	return CurrentlyPlayingSong;
+}
+
+TArray<ULevelSequencePlayer*> UUniversalBeatSubsystem::GetActiveTracks() const
+{
+	TArray<ULevelSequencePlayer*> Result;
+	for (ULevelSequencePlayer* Player : ActiveTrackPlayers)
+	{
+		if (IsValid(Player))
+		{
+			Result.Add(Player);
+		}
+	}
+	return Result;
+}
+
+bool UUniversalBeatSubsystem::IsPlayingSong() const
+{
+	return CurrentlyPlayingSong != nullptr && ActiveTrackPlayers.Num() > 0;
+}
+
+// Helper function implementations (stubs)
+
+void UUniversalBeatSubsystem::CleanupSongPlayback()
+{
+	// TODO: Implement in Phase 8 (User Story 6)
+	// Stop all active players
+	for (ULevelSequencePlayer* Player : ActiveTrackPlayers)
+	{
+		if (IsValid(Player))
+		{
+			Player->Stop();
+		}
+	}
+	ActiveTrackPlayers.Empty();
+	
+	// Clear all timers
+	if (UWorld* World = GetWorld())
+	{
+		for (FTimerHandle& Handle : TrackDelayTimers)
+		{
+			World->GetTimerManager().ClearTimer(Handle);
+		}
+	}
+	TrackDelayTimers.Empty();
+	LoopingTracks.Empty();
+	CompletedTracks.Empty();
+}
+
+void UUniversalBeatSubsystem::StartTrackWithDelay(int32 TrackIndex, float DelaySeconds)
+{
+	// TODO: Implement in Phase 8 (User Story 6)
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("StartTrackWithDelay: Track %d, Delay %.2fs"), TrackIndex, DelaySeconds);
+	}
+}
+
+void UUniversalBeatSubsystem::OnTrackDelayComplete(int32 TrackIndex)
+{
+	// TODO: Implement in Phase 8 (User Story 6)
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("OnTrackDelayComplete: Track %d"), TrackIndex);
+	}
+}
+
+void UUniversalBeatSubsystem::OnTrackSequenceFinished(int32 TrackIndex)
+{
+	// TODO: Implement in Phase 8 (User Story 6)
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("OnTrackSequenceFinished: Track %d"), TrackIndex);
+	}
+}
+
+bool UUniversalBeatSubsystem::CheckSongCompletion() const
+{
+	// TODO: Implement in Phase 8 (User Story 6)
 	return false;
 }

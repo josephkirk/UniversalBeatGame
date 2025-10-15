@@ -6,12 +6,24 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "UniversalBeatTypes.h"
 #include "Curves/CurveFloat.h"
+#include "Engine/TimerHandle.h"
 #include "UniversalBeatSubsystem.generated.h"
+
+// Forward declarations
+class USongConfiguration;
+class ULevelSequencePlayer;
+class UNoteChartDirector;
 
 // Event dispatcher delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnBeatInputCheck, FName, LabelName, FGameplayTag, InputTag, float, TimingValue);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBeat, FBeatEventData, BeatData);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCalibrationComplete, float, CalculatedOffsetMs, bool, bSuccess);
+
+// Note chart system event delegates
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSongStarted, FGameplayTag, SongTag);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSongEnded, FGameplayTag, SongTag);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTrackStarted, FGameplayTag, SongTag, int32, TrackIndex);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTrackEnded, FGameplayTag, SongTag, int32, TrackIndex);
 
 /**
  * UniversalBeat Subsystem - Game thread only
@@ -102,14 +114,15 @@ public:
 
 	/**
 	 * Check beat timing accuracy using a gameplay tag identifier.
-	 * Returns 0.0-1.0 value based on how close input was to beat.
+	 * Enhanced version for note chart system - returns detailed validation result.
+	 * If no note chart is active, falls back to standard beat timing.
 	 * Broadcasts OnBeatInputCheck event.
 	 * 
 	 * @param InputTag Gameplay tag identifier for this input
-	 * @return Timing accuracy: 0.0 = mid-beat (worst), 1.0 = on-beat (perfect)
+	 * @return Detailed validation result with accuracy, hit status, and timing feedback
 	 */
-	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Timing", meta = (Tooltip = "Check timing accuracy with gameplay tag. Returns 0.0-1.0."))
-	float CheckBeatTimingByTag(FGameplayTag InputTag);
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Timing", meta = (Tooltip = "Check timing accuracy with detailed feedback. Enhanced for note charts."))
+	FNoteValidationResult CheckBeatTimingByTag(FGameplayTag InputTag);
 
 	/**
 	 * Set the curve asset used to calculate timing accuracy from beat phase.
@@ -188,7 +201,73 @@ public:
 	bool IsBeatBroadcastingEnabled() const;
 
 	// ====================================================================
-	// 5. Debug & Utility
+	// 5. Note Chart System
+	// ====================================================================
+
+
+
+	/**
+	 * Register a song configuration for playback by tag.
+	 * 
+	 * @param SongConfig Song configuration data asset
+	 * @return True if successfully registered, False if invalid or duplicate tag
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Register song for playback. Returns false for invalid or duplicate tags."))
+	bool RegisterSong(USongConfiguration* SongConfig);
+
+	/**
+	 * Unregister a song configuration.
+	 * Stops the song if currently playing.
+	 * 
+	 * @param SongTag Gameplay tag of the song to unregister
+	 * @return True if song was found and removed
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Unregister song. Stops song if playing."))
+	bool UnregisterSong(FGameplayTag SongTag);
+
+	/**
+	 * Play a registered song by its gameplay tag.
+	 * Stops current song if any is playing.
+	 * 
+	 * @param SongTag Gameplay tag of the song to play
+	 * @return True if song was found and started successfully
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Play registered song by tag. Stops current song if any."))
+	bool PlaySongByTag(FGameplayTag SongTag);
+
+	/**
+	 * Stop the currently playing song.
+	 * Cleans up all active track players and timers.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Stop current song and clean up track players."))
+	void StopCurrentSong();
+
+	/**
+	 * Get the currently playing song configuration.
+	 * 
+	 * @return Current song config, or null if none playing
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Songs", meta = (Tooltip = "Get currently playing song configuration."))
+	USongConfiguration* GetCurrentSong() const;
+
+	/**
+	 * Get the active track players for the current song.
+	 * 
+	 * @return Array of level sequence players for active tracks
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Songs", meta = (Tooltip = "Get active level sequence players."))
+	TArray<ULevelSequencePlayer*> GetActiveTracks() const;
+
+	/**
+	 * Check if a song is currently playing.
+	 * 
+	 * @return True if any song is active
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Songs", meta = (Tooltip = "Check if any song is currently playing."))
+	bool IsPlayingSong() const;
+
+	// ====================================================================
+	// 6. Debug & Utility
 	// ====================================================================
 
 	/**
@@ -225,7 +304,7 @@ public:
 	float GetCurrentBeatPhase() const;
 
 	// ====================================================================
-	// 6. Event Dispatchers
+	// 7. Event Dispatchers
 	// ====================================================================
 
 	/**
@@ -255,6 +334,36 @@ public:
 	 */
 	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Events")
 	FOnCalibrationComplete OnCalibrationComplete;
+
+	// Note Chart System Events
+
+	/**
+	 * Event fired when a song starts playing.
+	 * Receives the song's gameplay tag identifier.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
+	FOnSongStarted OnSongStarted;
+
+	/**
+	 * Event fired when a song ends (all non-looping tracks complete).
+	 * Receives the song's gameplay tag identifier.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
+	FOnSongEnded OnSongEnded;
+
+	/**
+	 * Event fired when an individual track starts playing (after delay).
+	 * Receives song tag and track index.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
+	FOnTrackStarted OnTrackStarted;
+
+	/**
+	 * Event fired when an individual track ends (non-looping tracks only).
+	 * Receives song tag and track index.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
+	FOnTrackEnded OnTrackEnded;
 
 private:
 	// ====================================================================
@@ -312,6 +421,29 @@ private:
 	/** Whether we are currently in a paused state */
 	mutable bool bIsPaused = false;
 
+	// Note Chart System State
+
+	/** Map of registered song configurations by gameplay tag */
+	UPROPERTY()
+	TMap<FGameplayTag, TObjectPtr<USongConfiguration>> RegisteredSongs;
+
+	/** Currently playing song configuration */
+	UPROPERTY()
+	TObjectPtr<USongConfiguration> CurrentlyPlayingSong = nullptr;
+
+	/** Active level sequence players for current song tracks */
+	UPROPERTY()
+	TArray<TObjectPtr<ULevelSequencePlayer>> ActiveTrackPlayers;
+
+	/** Timer handles for delayed track starts */
+	TArray<FTimerHandle> TrackDelayTimers;
+
+	/** Track indices that are set to loop */
+	TSet<int32> LoopingTracks;
+
+	/** Track indices that have completed (for song end detection) */
+	TSet<int32> CompletedTracks;
+
 	// ====================================================================
 	// Internal Helper Functions
 	// ====================================================================
@@ -341,4 +473,22 @@ private:
 	
 	/** Check if game is currently paused */
 	bool IsPausedState() const;
+
+	// Note Chart System Helpers
+
+	/** Clean up song playback state */
+	void CleanupSongPlayback();
+
+	/** Start a track with delay */
+	void StartTrackWithDelay(int32 TrackIndex, float DelaySeconds);
+
+	/** Callback when a track delay timer expires */
+	void OnTrackDelayComplete(int32 TrackIndex);
+
+	/** Callback when a track sequence finishes */
+	UFUNCTION()
+	void OnTrackSequenceFinished(int32 TrackIndex);
+
+	/** Check if all non-looping tracks have completed */
+	bool CheckSongCompletion() const;
 };

@@ -17,7 +17,10 @@ public class UniversalBeat : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
-				"GameplayTags"
+				"GameplayTags",
+				"LevelSequence",
+				"MovieScene",
+				"MovieSceneTracks"
 			}
 		);
 		
