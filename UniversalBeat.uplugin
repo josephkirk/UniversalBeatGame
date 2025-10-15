@@ -13,17 +13,12 @@
 	"CanContainContent": true,
 	"IsBetaVersion": false,
 	"IsExperimentalVersion": false,
-	"Installed": true,
+	"Installed": false,
 	"Modules": [
 		{
 			"Name": "UniversalBeat",
 			"Type": "Runtime",
-			"LoadingPhase": "Default",
-			"PlatformAllowList": [],
-			"PlatformDenyList": [],
-			"TargetAllowList": [],
-			"TargetDenyList": [],
-			"AdditionalDependencies": []
+			"LoadingPhase": "Default"
 		}
 	],
 	"Plugins": []
