@@ -235,11 +235,11 @@ struct UNIVERSALBEAT_API FNoteTrackEntry
 
 	/** Whether this track should loop when it completes */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "UniversalBeat|Song")
-	bool bLoopTrack = false;
+	int LoopCount = 0;
 
 	FNoteTrackEntry()
 		: DelayOffset(0.0f)
-		, bLoopTrack(false)
+		, LoopCount(0)
 	{
 	}
 };

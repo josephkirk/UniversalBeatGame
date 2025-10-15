@@ -287,6 +287,17 @@ public:
 	bool PlaySongByTag(FGameplayTag SongTag, bool bQueue = false);
 
 	/**
+	 * Play a song by directly passing its data asset reference.
+	 * Song will be automatically registered if not already registered.
+	 * 
+	 * @param SongAsset Soft object reference to the song configuration data asset
+	 * @param bQueue If true, enqueue song after current. If false, clear queue and play immediately.
+	 * @return True if song asset is valid and queued/started successfully
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Play song by asset reference. Auto-registers if needed. Queue=true adds to playlist, Queue=false plays immediately."))
+	bool PlaySongByAsset(TSoftObjectPtr<USongConfiguration> SongAsset, bool bQueue = false);
+	
+	/**
 	 * Stop the currently playing song.
 	 * Cleans up all active track players and timers.
 	 */
