@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Subsystems/GameInstanceSubsystem.h"
+#include "Subsystems/LocalPlayerSubsystem.h"
 #include "UniversalBeatTypes.h"
 #include "Curves/CurveFloat.h"
 #include "Engine/TimerHandle.h"
@@ -12,7 +12,9 @@
 // Forward declarations
 class USongConfiguration;
 class ULevelSequencePlayer;
-class UNoteChartDirector;
+class ULevelSequence;
+class UMovieSceneNoteChartSection;
+class ALevelSequenceActor;
 
 // Event dispatcher delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnBeatInputCheck, FName, LabelName, FGameplayTag, InputTag, float, TimingValue);
@@ -38,9 +40,11 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTrackEnded, FGameplayTag, SongTa
  * - 30+ FPS: Full timing accuracy maintained
  * - <30 FPS: Timing accuracy may degrade below specification
  * - 60+ FPS: Optimal performance target
+ * 
+ * Note: Uses a dedicated "SongPlayer" LevelSequenceActor for all note chart playback.
  */
 UCLASS()
-class UNIVERSALBEAT_API UUniversalBeatSubsystem : public UGameInstanceSubsystem
+class UNIVERSALBEAT_API UUniversalBeatSubsystem : public ULocalPlayerSubsystem
 {
 	GENERATED_BODY()
 
@@ -204,6 +208,53 @@ public:
 	// 5. Note Chart System
 	// ====================================================================
 
+	/**
+	 * Play a level sequence containing note chart tracks.
+	 * Automatically loads notes and starts playback using the dedicated SongPlayer actor.
+	 * 
+	 * @param Sequence The level sequence containing note chart tracks
+	 * @return True if sequence was successfully loaded and started
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Play sequence with note chart tracks."))
+	bool PlayNoteChartSequence(ULevelSequence* Sequence);
+
+	/**
+	 * Stop the currently playing note chart sequence.
+	 * Clears all loaded notes and resets tracking state.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Stop current note chart sequence."))
+	void StopNoteChartSequence();
+
+	/**
+	 * Get all loaded notes from the active note chart.
+	 * 
+	 * @return Array of all note instances (sorted by timestamp)
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Get all loaded notes."))
+	TArray<FNoteInstance> GetAllNotes() const;
+
+	/**
+	 * Get the total number of loaded notes.
+	 * 
+	 * @return Note count
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Get total note count."))
+	int32 GetTotalNoteCount() const;
+
+	/**
+	 * Reset consumed notes (for looping sequences).
+	 * Allows notes to be validated again on subsequent plays.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Reset consumed notes for looping."))
+	void ResetConsumedNotes();
+
+	/**
+	 * Check if a note chart sequence is currently playing.
+	 * 
+	 * @return True if a sequence is active
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Check if note chart is playing."))
+	bool IsPlayingNoteChart() const;
 
 
 	/**
@@ -444,6 +495,30 @@ private:
 	/** Track indices that have completed (for song end detection) */
 	TSet<int32> CompletedTracks;
 
+	// Note Chart Tracking (moved from UNoteChartDirector)
+
+	/** Dedicated sequence actor for note chart playback */
+	UPROPERTY()
+	TObjectPtr<ALevelSequenceActor> SongPlayerActor = nullptr;
+
+	/** Currently loaded note chart sequence */
+	UPROPERTY()
+	TObjectPtr<ULevelSequence> CurrentNoteChartSequence = nullptr;
+
+	/** Cached sorted notes from all note chart sections */
+	UPROPERTY()
+	TArray<FNoteInstance> CachedNotesSorted;
+
+	/** Set of consumed note timestamps (for fast lookup) */
+	UPROPERTY()
+	TSet<int32> ConsumedNoteTimestamps;
+
+	/** Current note index for sequential playback tracking */
+	int32 CurrentNoteIndex = 0;
+
+	/** Frame rate of the registered sequence (cached for performance) */
+	FFrameRate CachedSequenceFrameRate;
+
 	// ====================================================================
 	// Internal Helper Functions
 	// ====================================================================
@@ -492,6 +567,35 @@ private:
 	/** Check if all non-looping tracks have completed */
 	bool CheckSongCompletion() const;
 
-	/** Get the active note chart director from currently playing sequences */
-	UNoteChartDirector* GetActiveNoteChartDirector() const;
+	// Note Chart Helpers (moved from UNoteChartDirector)
+
+	/** Load notes from a level sequence for validation tracking */
+	bool LoadNoteChartFromSequence(ULevelSequence* Sequence);
+
+	/** Clear all loaded notes and reset tracking state */
+	void ClearNoteChart();
+
+	/** Find next note with matching tag within timing window */
+	bool GetNextNoteForTag(FGameplayTag NoteTag, float CurrentTime, FNoteInstance& OutNote);
+
+	/** Mark a note as consumed (prevents re-validation) */
+	void MarkNoteConsumed(const FNoteInstance& Note);
+
+	/** Check if a note has been consumed */
+	bool IsNoteConsumed(const FNoteInstance& Note) const;
+
+	/** Convert frame number to seconds using cached sequence frame rate */
+	float FrameToSeconds(FFrameNumber Frame) const;
+
+	/** Convert seconds to frame number using cached sequence frame rate */
+	FFrameNumber SecondsToFrame(float Seconds) const;
+
+	/** Get current playback time from song player */
+	float GetCurrentPlaybackTime() const;
+
+	/** Create or get the SongPlayer actor and player using static factory method */
+	void EnsureSongPlayerActor();
+
+	/** Get the sequence player from SongPlayerActor with validation */
+	ULevelSequencePlayer* GetSongPlayer() const;
 };

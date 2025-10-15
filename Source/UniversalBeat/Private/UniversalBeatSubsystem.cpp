@@ -7,8 +7,12 @@
 #include "NoteDataAsset.h"
 #include "LevelSequence.h"
 #include "LevelSequencePlayer.h"
+#include "LevelSequenceActor.h"
 #include "UniversalBeatFunctionLibrary.h"
-#include "NoteChartDirector.h"
+#include "MovieScene.h"
+#include "MovieSceneNoteChartTrack.h"
+#include "MovieSceneNoteChartSection.h"
+#include "Engine/LocalPlayer.h"
 
 // Logging category
 DEFINE_LOG_CATEGORY_STATIC(LogUniversalBeat, Log, All);
@@ -26,6 +30,12 @@ void UUniversalBeatSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	bDebugLoggingEnabled = false;
 	CurrentSubdivision = EBeatSubdivision::None;
 	bCurveFallbackWarningLogged = false;
+
+	// Initialize note chart tracking
+	CurrentNoteIndex = 0;
+	CachedSequenceFrameRate = FFrameRate(60, 1); // Default 60 FPS
+
+	// SongPlayer actor will be spawned when needed (lazy initialization)
 
 	// Load default timing curve asset (will be created in T010)
 	// TimingCurve = LoadObject<UCurveFloat>(nullptr, TEXT("/UniversalBeat/Curves/DefaultTimingCurve"));
@@ -47,6 +57,13 @@ void UUniversalBeatSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UUniversalBeatSubsystem::Deinitialize()
 {
+	// Clean up SongPlayer actor
+	if (SongPlayerActor)
+	{
+		SongPlayerActor->Destroy();
+		SongPlayerActor = nullptr;
+	}
+
 	// T017: Clean up timers
 	if (UWorld* World = GetWorld())
 	{
@@ -635,29 +652,27 @@ FNoteValidationResult UUniversalBeatSubsystem::CheckBeatTimingByTag(FGameplayTag
 	Result.TimingDirection = ENoteTimingDirection::OnTime;
 	Result.TimingOffset = 0.0f;
 	
-	// Check if we have an active director
-	UNoteChartDirector* ActiveDirector = GetActiveNoteChartDirector();
-	
-	if (!ActiveDirector || !InputTag.IsValid())
+	// Check if we have loaded notes and a valid input tag
+	if (CachedNotesSorted.Num() == 0 || !InputTag.IsValid())
 	{
-		// T073: Fallback to standard beat timing when no note chart active
+		// T073: Fallback to standard beat timing when no note chart loaded
 		Result.Accuracy = CheckBeatTimingInternal(NAME_None, InputTag);
 		Result.TimingOffset = 0.0f; // Standard timing doesn't provide offset
 		
 		if (bDebugLoggingEnabled)
 		{
-			UE_LOG(LogUniversalBeat, Log, TEXT("CheckBeatTimingByTag: No active director, falling back to standard timing - Tag=%s, Accuracy=%.3f"), 
+			UE_LOG(LogUniversalBeat, Log, TEXT("CheckBeatTimingByTag: No notes loaded, falling back to standard timing - Tag=%s, Accuracy=%.3f"), 
 				*InputTag.ToString(), Result.Accuracy);
 		}
 		
 		return Result;
 	}
 	
-	// T074: Query director for next note with matching tag
+	// T074: Query for next note with matching tag
 	FNoteInstance FoundNote;
-	float CurrentTime = Result.InputTimestamp; // Use input timestamp as current time
+	float CurrentTime = GetCurrentPlaybackTime();
 	
-	if (!ActiveDirector->GetNextNoteForTag(InputTag, CurrentTime, FoundNote))
+	if (!GetNextNoteForTag(InputTag, CurrentTime, FoundNote))
 	{
 		// No note found within timing window for this tag
 		Result.bHit = false;
@@ -676,7 +691,7 @@ FNoteValidationResult UUniversalBeatSubsystem::CheckBeatTimingByTag(FGameplayTag
 	// T075: Populate validation result with note data
 	Result.NoteTag = FoundNote.NoteData->GetNoteTag();
 	Result.NoteData = FoundNote.NoteData;
-	Result.NoteTimestamp = ActiveDirector->FrameToSeconds(FoundNote.Timestamp);
+	Result.NoteTimestamp = FrameToSeconds(FoundNote.Timestamp);
 	
 	// T072: Calculate timing offset and direction
 	Result.TimingOffset = CurrentTime - Result.NoteTimestamp;
@@ -709,7 +724,7 @@ FNoteValidationResult UUniversalBeatSubsystem::CheckBeatTimingByTag(FGameplayTag
 	Result.bHit = true;
 	
 	// T074: Mark note as consumed to prevent re-validation
-	ActiveDirector->MarkNoteConsumed(FoundNote);
+	MarkNoteConsumed(FoundNote);
 	
 	// T076: Log validation event for debugging
 	if (bDebugLoggingEnabled)
@@ -915,23 +930,355 @@ bool UUniversalBeatSubsystem::CheckSongCompletion() const
 }
 
 // ====================================================================
-// Internal Helper for Note Chart Director Access
+// Note Chart System Implementation (moved from UNoteChartDirector)
 // ====================================================================
 
-UNoteChartDirector* UUniversalBeatSubsystem::GetActiveNoteChartDirector() const
+bool UUniversalBeatSubsystem::LoadNoteChartFromSequence(ULevelSequence* Sequence)
 {
-	// TODO: Implement proper director access when UE 5.6 API for directors is available
-	// For now, return nullptr - users will need to manually pass director reference
-	// or we can add a RegisterDirector/UnregisterDirector API
-	
-	// Temporary solution: Check if we have any active track players
-	// In a real implementation, we would:
-	// 1. Get the director from the sequence player
-	// 2. Cast it to UNoteChartDirector
-	// 3. Return it
-	
-	// Note: UE 5.6 changed the director API - GetDirectorClass() and GetDirectorInstance()
-	// are not available. We need to find an alternative approach or require manual registration.
-	
-	return nullptr;
+	if (!Sequence)
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("LoadNoteChartFromSequence: Invalid sequence"));
+		return false;
+	}
+
+	// Clear existing data
+	CachedNotesSorted.Empty();
+	ConsumedNoteTimestamps.Empty();
+	CurrentNoteIndex = 0;
+
+	// Get the movie scene
+	UMovieScene* MovieScene = Sequence->GetMovieScene();
+	if (!MovieScene)
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("LoadNoteChartFromSequence: No movie scene"));
+		return false;
+	}
+
+	// Cache frame rate for performance
+	CachedSequenceFrameRate = MovieScene->GetDisplayRate();
+
+	// Find all note chart tracks
+	const TArray<UMovieSceneTrack*>& AllTracks = MovieScene->GetTracks();
+	for (UMovieSceneTrack* Track : AllTracks)
+	{
+		UMovieSceneNoteChartTrack* NoteTrack = Cast<UMovieSceneNoteChartTrack>(Track);
+		if (!NoteTrack)
+		{
+			continue;
+		}
+
+		// Get all sections from this track
+		const TArray<UMovieSceneSection*>& Sections = NoteTrack->GetAllSections();
+		for (UMovieSceneSection* Section : Sections)
+		{
+			UMovieSceneNoteChartSection* NoteSection = Cast<UMovieSceneNoteChartSection>(Section);
+			if (NoteSection)
+			{
+				// Add all notes from this section
+				CachedNotesSorted.Append(NoteSection->Notes);
+			}
+		}
+	}
+
+	// Sort notes by timestamp
+	CachedNotesSorted.Sort([](const FNoteInstance& A, const FNoteInstance& B)
+	{
+		return A.Timestamp < B.Timestamp;
+	});
+
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("LoadNoteChartFromSequence: Loaded %d notes"),
+			CachedNotesSorted.Num());
+	}
+
+	return CachedNotesSorted.Num() > 0;
 }
+
+void UUniversalBeatSubsystem::ClearNoteChart()
+{
+	CachedNotesSorted.Empty();
+	ConsumedNoteTimestamps.Empty();
+	CurrentNoteIndex = 0;
+
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("ClearNoteChart: Cleared all notes and reset tracking"));
+	}
+}
+
+TArray<FNoteInstance> UUniversalBeatSubsystem::GetAllNotes() const
+{
+	return CachedNotesSorted;
+}
+
+int32 UUniversalBeatSubsystem::GetTotalNoteCount() const
+{
+	return CachedNotesSorted.Num();
+}
+
+void UUniversalBeatSubsystem::ResetConsumedNotes()
+{
+	ConsumedNoteTimestamps.Empty();
+	CurrentNoteIndex = 0;
+
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("ResetConsumedNotes: Reset for loop/restart"));
+	}
+}
+
+bool UUniversalBeatSubsystem::PlayNoteChartSequence(ULevelSequence* Sequence)
+{
+	if (!Sequence)
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("PlayNoteChartSequence: Invalid sequence"));
+		return false;
+	}
+
+	// Validate that the sequence has at least one NoteChartTrack
+	UMovieScene* MovieScene = Sequence->GetMovieScene();
+	if (!MovieScene)
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("PlayNoteChartSequence: Sequence has no movie scene"));
+		return false;
+	}
+
+	// Check if sequence contains any NoteChartTrack
+	bool bHasNoteChartTrack = false;
+	const TArray<UMovieSceneTrack*>& AllTracks = MovieScene->GetTracks();
+	for (UMovieSceneTrack* Track : AllTracks)
+	{
+		if (Cast<UMovieSceneNoteChartTrack>(Track))
+		{
+			bHasNoteChartTrack = true;
+			break;
+		}
+	}
+
+	if (!bHasNoteChartTrack)
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("PlayNoteChartSequence: Sequence '%s' contains no NoteChartTrack"),
+			*Sequence->GetName());
+		return false;
+	}
+
+	// Ensure we have a SongPlayer actor and player
+
+	if (!SongPlayerActor)
+	{
+		UE_LOG(LogUniversalBeat, Error, TEXT("PlayNoteChartSequence: Failed to create SongPlayer actor"));
+		return false;
+	}
+
+	// Stop current sequence if any
+	if (CurrentNoteChartSequence)
+	{
+		StopNoteChartSequence();
+	}
+
+	// Set the new sequence on the actor
+	SongPlayerActor->SetSequence(Sequence);
+	CurrentNoteChartSequence = Sequence;
+
+	// Load notes from the sequence
+	if (!LoadNoteChartFromSequence(Sequence))
+	{
+		UE_LOG(LogUniversalBeat, Warning, TEXT("PlayNoteChartSequence: Failed to load notes from sequence"));
+		CurrentNoteChartSequence = nullptr;
+		return false;
+	}
+
+	// Start playback - get player from actor
+	ULevelSequencePlayer* Player = GetSongPlayer();
+	if (Player)
+	{
+		Player->Play();
+	}
+
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("PlayNoteChartSequence: Started sequence '%s' with %d notes"),
+			*Sequence->GetName(), CachedNotesSorted.Num());
+	}
+
+	return true;
+}
+
+void UUniversalBeatSubsystem::StopNoteChartSequence()
+{
+	ULevelSequencePlayer* Player = GetSongPlayer();
+	if (Player && Player->IsPlaying())
+	{
+		Player->Stop();
+	}
+
+	CurrentNoteChartSequence = nullptr;
+	ClearNoteChart();
+
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("StopNoteChartSequence: Stopped sequence and cleared notes"));
+	}
+}
+
+bool UUniversalBeatSubsystem::IsPlayingNoteChart() const
+{
+	if (!CurrentNoteChartSequence)
+	{
+		return false;
+	}
+
+	ULevelSequencePlayer* Player = GetSongPlayer();
+	return Player && Player->IsPlaying();
+}
+
+bool UUniversalBeatSubsystem::GetNextNoteForTag(FGameplayTag NoteTag, float CurrentTime, FNoteInstance& OutNote)
+{
+	if (!NoteTag.IsValid() || CachedNotesSorted.Num() == 0)
+	{
+		return false;
+	}
+
+	// Binary search for notes around current time
+	// Start from current index to optimize sequential playback
+	for (int32 i = CurrentNoteIndex; i < CachedNotesSorted.Num(); ++i)
+	{
+		const FNoteInstance& Note = CachedNotesSorted[i];
+
+		// Skip if already consumed
+		if (ConsumedNoteTimestamps.Contains(Note.Timestamp.Value))
+		{
+			continue;
+		}
+
+		// Skip if wrong tag
+		if (!Note.NoteData || Note.NoteData->GetNoteTag() != NoteTag)
+		{
+			continue;
+		}
+
+		// Convert note timestamp to seconds
+		float NoteTimeSeconds = FrameToSeconds(Note.Timestamp);
+
+		// Calculate timing windows
+		float PreTimingSeconds = UUniversalBeatFunctionLibrary::ConvertMusicalNoteToSeconds(
+			Note.NoteData->GetPreTiming(), CurrentBPM);
+		float PostTimingSeconds = UUniversalBeatFunctionLibrary::ConvertMusicalNoteToSeconds(
+			Note.NoteData->GetPostTiming(), CurrentBPM);
+
+		float WindowStart = NoteTimeSeconds - PreTimingSeconds;
+		float WindowEnd = NoteTimeSeconds + PostTimingSeconds;
+
+		// Check if current time is within timing window
+		if (CurrentTime >= WindowStart && CurrentTime <= WindowEnd)
+		{
+			// Update current index for next search
+			CurrentNoteIndex = i;
+			OutNote = Note;
+			return true;
+		}
+
+		// If we've passed the window, this note is missed
+		if (CurrentTime > WindowEnd)
+		{
+			// TODO: Trigger miss event in future phase
+			continue;
+		}
+
+		// If we haven't reached the window yet, stop searching
+		if (CurrentTime < WindowStart)
+		{
+			break;
+		}
+	}
+
+	return false;
+}
+
+void UUniversalBeatSubsystem::MarkNoteConsumed(const FNoteInstance& Note)
+{
+	ConsumedNoteTimestamps.Add(Note.Timestamp.Value);
+}
+
+bool UUniversalBeatSubsystem::IsNoteConsumed(const FNoteInstance& Note) const
+{
+	return ConsumedNoteTimestamps.Contains(Note.Timestamp.Value);
+}
+
+float UUniversalBeatSubsystem::FrameToSeconds(FFrameNumber Frame) const
+{
+	return CachedSequenceFrameRate.AsSeconds(Frame);
+}
+
+FFrameNumber UUniversalBeatSubsystem::SecondsToFrame(float Seconds) const
+{
+	return CachedSequenceFrameRate.AsFrameNumber(Seconds);
+}
+
+float UUniversalBeatSubsystem::GetCurrentPlaybackTime() const
+{
+	ULevelSequencePlayer* Player = GetSongPlayer();
+	if (!Player || !Player->IsPlaying())
+	{
+		// Fallback to real-time if no player active or not playing
+		return FPlatformTime::Seconds();
+	}
+
+	// Get current playback position from the player
+	FFrameTime CurrentFrame = Player->GetCurrentTime().Time;
+	return FrameToSeconds(CurrentFrame.GetFrame());
+}
+
+void UUniversalBeatSubsystem::EnsureSongPlayerActor()
+{
+	// Check if we already have a valid actor
+	if (SongPlayerActor && IsValid(SongPlayerActor))
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		UE_LOG(LogUniversalBeat, Error, TEXT("EnsureSongPlayerActor: No valid world"));
+		return;
+	}
+
+	// Use the static factory method to create both player and actor
+	// Note: We pass nullptr for InLevelSequence since we'll set it later via SetSequence()
+	FMovieSceneSequencePlaybackSettings PlaybackSettings;
+	PlaybackSettings.bAutoPlay = false; // Don't auto-play, we'll control playback manually
+	
+	ALevelSequenceActor* OutActor = nullptr;
+	ULevelSequencePlayer* Player = ULevelSequencePlayer::CreateLevelSequencePlayer(
+		World,
+		nullptr, // Sequence will be set later
+		PlaybackSettings,
+		OutActor
+	);
+
+	if (!OutActor)
+	{
+		UE_LOG(LogUniversalBeat, Error, TEXT("EnsureSongPlayerActor: Failed to create SongPlayer actor"));
+		return;
+	}
+
+	SongPlayerActor = OutActor;
+
+	// Rename the actor for easy identification in the outliner
+	SongPlayerActor->Rename(TEXT("SongPlayer"));
+
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("EnsureSongPlayerActor: Created SongPlayer actor and player"));
+	}
+}
+
+ULevelSequencePlayer* UUniversalBeatSubsystem::GetSongPlayer() const
+{
+
+
+	return SongPlayerActor->GetSequencePlayer();
+}
+
