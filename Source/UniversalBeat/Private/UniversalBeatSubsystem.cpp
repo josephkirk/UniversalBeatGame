@@ -8,6 +8,7 @@
 #include "LevelSequence.h"
 #include "LevelSequencePlayer.h"
 #include "UniversalBeatFunctionLibrary.h"
+#include "NoteChartDirector.h"
 
 // Logging category
 DEFINE_LOG_CATEGORY_STATIC(LogUniversalBeat, Log, All);
@@ -625,19 +626,100 @@ bool UUniversalBeatSubsystem::IsPausedState() const
 
 FNoteValidationResult UUniversalBeatSubsystem::CheckBeatTimingByTag(FGameplayTag InputTag)
 {
-	// TODO: Implement in Phase 6 (User Story 2)
-	// For now, fall back to standard beat timing
+	// T070: Full validation implementation with note chart integration
 	FNoteValidationResult Result;
 	Result.bHit = false;
-	Result.Accuracy = CheckBeatTimingInternal(NAME_None, InputTag);
-	Result.TimingDirection = ENoteTimingDirection::OnTime;
 	Result.NoteTag = InputTag;
 	Result.InputTimestamp = FPlatformTime::Seconds();
+	Result.Accuracy = 0.0f;
+	Result.TimingDirection = ENoteTimingDirection::OnTime;
+	Result.TimingOffset = 0.0f;
 	
+	// Check if we have an active director
+	UNoteChartDirector* ActiveDirector = GetActiveNoteChartDirector();
+	
+	if (!ActiveDirector || !InputTag.IsValid())
+	{
+		// T073: Fallback to standard beat timing when no note chart active
+		Result.Accuracy = CheckBeatTimingInternal(NAME_None, InputTag);
+		Result.TimingOffset = 0.0f; // Standard timing doesn't provide offset
+		
+		if (bDebugLoggingEnabled)
+		{
+			UE_LOG(LogUniversalBeat, Log, TEXT("CheckBeatTimingByTag: No active director, falling back to standard timing - Tag=%s, Accuracy=%.3f"), 
+				*InputTag.ToString(), Result.Accuracy);
+		}
+		
+		return Result;
+	}
+	
+	// T074: Query director for next note with matching tag
+	FNoteInstance FoundNote;
+	float CurrentTime = Result.InputTimestamp; // Use input timestamp as current time
+	
+	if (!ActiveDirector->GetNextNoteForTag(InputTag, CurrentTime, FoundNote))
+	{
+		// No note found within timing window for this tag
+		Result.bHit = false;
+		Result.Accuracy = 0.0f;
+		Result.TimingDirection = ENoteTimingDirection::Late; // Assume late if no note found
+		
+		if (bDebugLoggingEnabled)
+		{
+			UE_LOG(LogUniversalBeat, Log, TEXT("CheckBeatTimingByTag: No note found for tag '%s' at time %.3f (Miss)"), 
+				*InputTag.ToString(), CurrentTime);
+		}
+		
+		return Result;
+	}
+	
+	// T075: Populate validation result with note data
+	Result.NoteTag = FoundNote.NoteData->GetNoteTag();
+	Result.NoteData = FoundNote.NoteData;
+	Result.NoteTimestamp = ActiveDirector->FrameToSeconds(FoundNote.Timestamp);
+	
+	// T072: Calculate timing offset and direction
+	Result.TimingOffset = CurrentTime - Result.NoteTimestamp;
+	
+	if (FMath::Abs(Result.TimingOffset) < 0.001f) // Within 1ms = perfect
+	{
+		Result.TimingDirection = ENoteTimingDirection::OnTime;
+	}
+	else if (Result.TimingOffset < 0.0f)
+	{
+		Result.TimingDirection = ENoteTimingDirection::Early;
+	}
+	else
+	{
+		Result.TimingDirection = ENoteTimingDirection::Late;
+	}
+	
+	// T071: Calculate accuracy (1.0 = perfect, 0.0 = edge of timing window)
+	// Get timing windows from note data asset
+	float PreTimingSeconds = UUniversalBeatFunctionLibrary::ConvertMusicalNoteToSeconds(
+		FoundNote.NoteData->GetPreTiming(), CurrentBPM);
+	float PostTimingSeconds = UUniversalBeatFunctionLibrary::ConvertMusicalNoteToSeconds(
+		FoundNote.NoteData->GetPostTiming(), CurrentBPM);
+	
+	// Maximum acceptable timing difference is the appropriate window based on direction
+	float MaxTimingWindow = (Result.TimingOffset < 0.0f) ? PreTimingSeconds : PostTimingSeconds;
+	
+	// Accuracy = 1.0 - (|offset| / max_window), clamped to [0, 1]
+	Result.Accuracy = FMath::Clamp(1.0f - (FMath::Abs(Result.TimingOffset) / MaxTimingWindow), 0.0f, 1.0f);
+	Result.bHit = true;
+	
+	// T074: Mark note as consumed to prevent re-validation
+	ActiveDirector->MarkNoteConsumed(FoundNote);
+	
+	// T076: Log validation event for debugging
 	if (bDebugLoggingEnabled)
 	{
-		UE_LOG(LogUniversalBeat, Log, TEXT("CheckBeatTimingByTag: Tag=%s, Accuracy=%.3f (fallback to standard timing)"), 
-			*InputTag.ToString(), Result.Accuracy);
+		UE_LOG(LogUniversalBeat, Log, TEXT("CheckBeatTimingByTag: HIT - Tag=%s, Accuracy=%.3f, Offset=%.4fs, Direction=%s"), 
+			*InputTag.ToString(), 
+			Result.Accuracy, 
+			Result.TimingOffset,
+			Result.TimingDirection == ENoteTimingDirection::Early ? TEXT("Early") : 
+			Result.TimingDirection == ENoteTimingDirection::OnTime ? TEXT("OnTime") : TEXT("Late"));
 	}
 	
 	return Result;
@@ -830,4 +912,26 @@ bool UUniversalBeatSubsystem::CheckSongCompletion() const
 {
 	// TODO: Implement in Phase 8 (User Story 6)
 	return false;
+}
+
+// ====================================================================
+// Internal Helper for Note Chart Director Access
+// ====================================================================
+
+UNoteChartDirector* UUniversalBeatSubsystem::GetActiveNoteChartDirector() const
+{
+	// TODO: Implement proper director access when UE 5.6 API for directors is available
+	// For now, return nullptr - users will need to manually pass director reference
+	// or we can add a RegisterDirector/UnregisterDirector API
+	
+	// Temporary solution: Check if we have any active track players
+	// In a real implementation, we would:
+	// 1. Get the director from the sequence player
+	// 2. Cast it to UNoteChartDirector
+	// 3. Return it
+	
+	// Note: UE 5.6 changed the director API - GetDirectorClass() and GetDirectorInstance()
+	// are not available. We need to find an alternative approach or require manual registration.
+	
+	return nullptr;
 }

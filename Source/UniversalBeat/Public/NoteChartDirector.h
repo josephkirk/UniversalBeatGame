@@ -82,6 +82,18 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Director")
 	float GetCurrentBPM() const;
 
+	/**
+	 * Convert frame number to seconds using sequence frame rate
+	 */
+	UFUNCTION(BlueprintPure, Category = "UniversalBeat|Director")
+	float FrameToSeconds(FFrameNumber Frame) const;
+
+	/**
+	 * Convert seconds to frame number using sequence frame rate
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Director")
+	FFrameNumber SecondsToFrame(float Seconds) const;
+
 	// Blueprint implementable events for game logic
 
 	/**
@@ -133,13 +145,4 @@ protected:
 	UFUNCTION()
 	void UpdateMissDetection(float CurrentTime);
 
-	/**
-	 * Convert frame number to seconds using sequence frame rate
-	 */
-	float FrameToSeconds(FFrameNumber Frame) const;
-
-	/**
-	 * Convert seconds to frame number using sequence frame rate
-	 */
-	FFrameNumber SecondsToFrame(float Seconds) const;
 };

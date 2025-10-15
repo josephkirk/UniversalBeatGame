@@ -491,4 +491,7 @@ private:
 
 	/** Check if all non-looping tracks have completed */
 	bool CheckSongCompletion() const;
+
+	/** Get the active note chart director from currently playing sequences */
+	UNoteChartDirector* GetActiveNoteChartDirector() const;
 };
