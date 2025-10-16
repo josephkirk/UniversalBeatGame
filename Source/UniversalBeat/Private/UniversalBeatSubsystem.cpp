@@ -357,7 +357,7 @@ float UUniversalBeatSubsystem::CalculateBeatPhase() const
 	bool bCurrentlyPaused = bRespectTimeDilation && IsPausedState();
 	
 	// Get current time based on time dilation setting
-	double CurrentTime;
+	double CurrentTime = 0.0;;
 
 	// Apply calibration offset
 	double CalibrationOffsetSeconds = CalibrationOffsetMs / 1000.0;

@@ -13,10 +13,11 @@
 UENUM(BlueprintType)
 enum class EBeatSubdivision : uint8
 {
+	None    UMETA(DisplayName = "No Broadcast Beat"),
 	Whole    UMETA(DisplayName = "Full Beats Only"),
 	Half    UMETA(DisplayName = "Half Beats"),
 	Quarter UMETA(DisplayName = "Quarter Beats"),
-	Eighth  UMETA(DisplayName = "Eighth Beats")
+	Eighth  UMETA(DisplayName = "Eighth Beats"),
 	Sixteenth UMETA(DisplayName = "Sixteenth Beats")
 };
 
