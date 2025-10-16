@@ -3,15 +3,30 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Subsystems/GameInstanceSubsystem.h"
+#include "Subsystems/LocalPlayerSubsystem.h"
 #include "UniversalBeatTypes.h"
 #include "Curves/CurveFloat.h"
+#include "Engine/TimerHandle.h"
 #include "UniversalBeatSubsystem.generated.h"
+
+// Forward declarations
+class USongConfiguration;
+class ULevelSequencePlayer;
+class ULevelSequence;
+class UMovieSceneNoteChartSection;
+class ALevelSequenceActor;
 
 // Event dispatcher delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnBeatInputCheck, FName, LabelName, FGameplayTag, InputTag, float, TimingValue);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBeat, FBeatEventData, BeatData);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCalibrationComplete, float, CalculatedOffsetMs, bool, bSuccess);
+
+// Note chart system event delegates
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSongStarted);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSongEnded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTrackStarted, int32, TrackIndex);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTrackEnded, int32, TrackIndex);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNoteBeat, FNoteInstance, NoteData);
 
 /**
  * UniversalBeat Subsystem - Game thread only
@@ -26,9 +41,11 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCalibrationComplete, float, Calc
  * - 30+ FPS: Full timing accuracy maintained
  * - <30 FPS: Timing accuracy may degrade below specification
  * - 60+ FPS: Optimal performance target
+ * 
+ * Note: Uses a dedicated "SongPlayer" LevelSequenceActor for all note chart playback.
  */
 UCLASS()
-class UNIVERSALBEAT_API UUniversalBeatSubsystem : public UGameInstanceSubsystem
+class UNIVERSALBEAT_API UUniversalBeatSubsystem : public ULocalPlayerSubsystem
 {
 	GENERATED_BODY()
 
@@ -102,14 +119,15 @@ public:
 
 	/**
 	 * Check beat timing accuracy using a gameplay tag identifier.
-	 * Returns 0.0-1.0 value based on how close input was to beat.
+	 * Enhanced version for note chart system - returns detailed validation result.
+	 * If no note chart is active, falls back to standard beat timing.
 	 * Broadcasts OnBeatInputCheck event.
 	 * 
 	 * @param InputTag Gameplay tag identifier for this input
-	 * @return Timing accuracy: 0.0 = mid-beat (worst), 1.0 = on-beat (perfect)
+	 * @return Detailed validation result with accuracy, hit status, and timing feedback
 	 */
-	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Timing", meta = (Tooltip = "Check timing accuracy with gameplay tag. Returns 0.0-1.0."))
-	float CheckBeatTimingByTag(FGameplayTag InputTag);
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Timing", meta = (Tooltip = "Check timing accuracy with detailed feedback. Enhanced for note charts."))
+	FNoteValidationResult CheckBeatTimingByTag(FGameplayTag InputTag);
 
 	/**
 	 * Set the curve asset used to calculate timing accuracy from beat phase.
@@ -188,7 +206,131 @@ public:
 	bool IsBeatBroadcastingEnabled() const;
 
 	// ====================================================================
-	// 5. Debug & Utility
+	// 5. Note Chart System
+	// ====================================================================
+
+	/**
+	 * Play a level sequence containing note chart tracks.
+	 * Automatically loads notes and starts playback using the dedicated SongPlayer actor.
+	 * 
+	 * @param Sequence The level sequence containing note chart tracks
+	 * @return True if sequence was successfully loaded and started
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Play sequence with note chart tracks."))
+	bool PlayNoteChartSequence(ULevelSequence* Sequence);
+
+	/**
+	 * Stop the currently playing note chart sequence.
+	 * Clears all loaded notes and resets tracking state.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Stop current note chart sequence."))
+	void StopNoteChartSequence();
+
+	/**
+	 * Get all loaded notes from the active note chart.
+	 * 
+	 * @return Array of all note instances (sorted by timestamp)
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Get all loaded notes."))
+	TArray<FNoteInstance> GetAllNotes() const;
+
+	/**
+	 * Get the total number of loaded notes.
+	 * 
+	 * @return Note count
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Get total note count."))
+	int32 GetTotalNoteCount() const;
+
+	/**
+	 * Reset consumed notes (for looping sequences).
+	 * Allows notes to be validated again on subsequent plays.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Reset consumed notes for looping."))
+	void ResetConsumedNotes();
+
+	/**
+	 * Check if a note chart sequence is currently playing.
+	 * 
+	 * @return True if a sequence is active
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|NoteChart", meta = (Tooltip = "Check if note chart is playing."))
+	bool IsPlayingNoteChart() const;
+
+
+	/**
+	 * Register a song configuration for playback by tag.
+	 * 
+	 * @param SongConfig Song configuration data asset
+	 * @return True if successfully registered, False if invalid or duplicate tag
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Register song for playback. Returns false for invalid or duplicate tags."))
+	bool RegisterSong(USongConfiguration* SongConfig);
+
+	/**
+	 * Unregister a song configuration.
+	 * Stops the song if currently playing.
+	 * 
+	 * @param SongTag Gameplay tag of the song to unregister
+	 * @return True if song was found and removed
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Unregister song. Stops song if playing."))
+	bool UnregisterSong(FGameplayTag SongTag);
+
+	/**
+	 * Play a registered song by its gameplay tag.
+	 * 
+	 * @param SongTag Gameplay tag of the song to play
+	 * @param bQueue If true, enqueue song after current. If false, clear queue and play immediately.
+	 * @return True if song was found and queued/started successfully
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Play registered song by tag. Queue=true adds to playlist, Queue=false plays immediately."))
+	bool PlaySongByTag(FGameplayTag SongTag, bool bQueue = false);
+
+	/**
+	 * Play a song by directly passing its data asset reference.
+	 * Song will be automatically registered if not already registered.
+	 * 
+	 * @param SongAsset Soft object reference to the song configuration data asset
+	 * @param bQueue If true, enqueue song after current. If false, clear queue and play immediately.
+	 * @return True if song asset is valid and queued/started successfully
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Play song by asset reference. Auto-registers if needed. Queue=true adds to playlist, Queue=false plays immediately."))
+	bool PlaySongByAsset(TSoftObjectPtr<USongConfiguration> SongAsset, bool bQueue = false);
+	
+	/**
+	 * Stop the currently playing song.
+	 * Cleans up all active track players and timers.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Songs", meta = (Tooltip = "Stop current song and clean up track players."))
+	void StopCurrentSong();
+
+	/**
+	 * Get the currently playing song configuration.
+	 * 
+	 * @return Current song config, or null if none playing
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Songs", meta = (Tooltip = "Get currently playing song configuration."))
+	USongConfiguration* GetCurrentSong() const;
+
+	/**
+	 * Get the active track players for the current song.
+	 * 
+	 * @return Array of level sequence players for active tracks
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Songs", meta = (Tooltip = "Get active level sequence players."))
+	TArray<ULevelSequencePlayer*> GetActiveTracks() const;
+
+	/**
+	 * Check if a song is currently playing.
+	 * 
+	 * @return True if any song is active
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Songs", meta = (Tooltip = "Check if any song is currently playing."))
+	bool IsPlayingSong() const;
+
+	// ====================================================================
+	// 6. Debug & Utility
 	// ====================================================================
 
 	/**
@@ -225,7 +367,7 @@ public:
 	float GetCurrentBeatPhase() const;
 
 	// ====================================================================
-	// 6. Event Dispatchers
+	// 7. Event Dispatchers
 	// ====================================================================
 
 	/**
@@ -255,6 +397,50 @@ public:
 	 */
 	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Events")
 	FOnCalibrationComplete OnCalibrationComplete;
+
+	// Note Chart System Events
+
+	/**
+	 * Event fired when a song starts playing.
+	 * Receives the song configuration asset.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
+	FOnSongStarted OnSongStarted;
+
+	/**
+	 * Event fired when a song ends (all non-looping tracks complete).
+	 * Receives the song configuration asset.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
+	FOnSongEnded OnSongEnded;
+
+	/**
+	 * Event fired when an individual track starts playing (after delay).
+	 * Receives song tag and track index.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
+	FOnTrackStarted OnTrackStarted;
+
+	/**
+	 * Event fired when an individual track ends (non-looping tracks only).
+	 * Receives song tag and track index.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
+	FOnTrackEnded OnTrackEnded;
+
+	/**
+	 * Event fired when a note is triggered during playback.
+	 * Receives the note instance with timing and note data information.
+	 * This fires for every note as it plays, allowing for visual/audio feedback.
+	 * 
+	 * Use cases:
+	 * - Spawn visual note indicators
+	 * - Trigger sound effects
+	 * - Update UI elements
+	 * - Track note approach timing
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Note Events")
+	FOnNoteBeat OnNoteBeat;
 
 private:
 	// ====================================================================
@@ -312,6 +498,52 @@ private:
 	/** Whether we are currently in a paused state */
 	mutable bool bIsPaused = false;
 
+	// Note Chart System State
+
+	/** Map of registered song configurations by gameplay tag */
+	UPROPERTY()
+	TMap<FGameplayTag, TObjectPtr<USongConfiguration>> RegisteredSongs;
+
+	/** Queue of songs to play */
+	TQueue<TObjectPtr<USongConfiguration>> QueuedSongs;
+
+	/** Queue of tracks from current song to play sequentially */
+	TQueue<FNoteTrackEntry> QueuedTracks;
+
+	/** Currently playing song configuration */
+	UPROPERTY()
+	TObjectPtr<USongConfiguration> CurrentlyPlayingSong = nullptr;
+
+	/** Currently playing track info */
+	FNoteTrackEntry CurrentTrackInfo;
+
+	/** Timer handle for delayed track start */
+	FTimerHandle TrackDelayTimer;
+
+	// Note Chart Tracking (moved from UNoteChartDirector)
+
+	/** Dedicated sequence actor for note chart playback */
+	UPROPERTY()
+	TObjectPtr<ALevelSequenceActor> SongPlayerActor = nullptr;
+
+	/** Currently loaded note chart sequence */
+	UPROPERTY()
+	TObjectPtr<ULevelSequence> CurrentNoteChartSequence = nullptr;
+
+	/** Cached sorted notes from all note chart sections */
+	UPROPERTY()
+	TArray<FNoteInstance> CachedNotesSorted;
+
+	/** Set of consumed note timestamps (for fast lookup) */
+	UPROPERTY()
+	TSet<int32> ConsumedNoteTimestamps;
+
+	/** Current note index for sequential playback tracking */
+	int32 CurrentNoteIndex = 0;
+
+	/** Frame rate of the registered sequence (cached for performance) */
+	FFrameRate CachedSequenceFrameRate;
+
 	// ====================================================================
 	// Internal Helper Functions
 	// ====================================================================
@@ -341,4 +573,64 @@ private:
 	
 	/** Check if game is currently paused */
 	bool IsPausedState() const;
+
+	// Note Chart System Helpers
+
+	/** Clean up song playback state */
+	void CleanupSongPlayback();
+
+	/** Dequeue and play next song from queue */
+	void PlaySong();
+
+	/** Dequeue and play next track from current song */
+	void PlayTrack();
+
+	/** Start a track with delay */
+	void StartTrackWithDelay(float DelaySeconds);
+
+	/** Callback when a track delay timer expires */
+	void OnTrackDelayComplete();
+
+	/** Callback when a track sequence finishes */
+	UFUNCTION()
+	void OnTrackSequenceFinished();
+	
+	/** Callback when SongPlayerActor finishes (delegates to OnTrackSequenceFinished) */
+	UFUNCTION()
+	void OnSongPlayerFinished();
+
+	/** Check if all non-looping tracks have completed */
+	bool CheckSongCompletion() const;
+
+	// Note Chart Helpers (moved from UNoteChartDirector)
+
+	/** Load notes from a level sequence for validation tracking */
+	bool LoadNoteChartFromSequence(ULevelSequence* Sequence);
+
+	/** Clear all loaded notes and reset tracking state */
+	void ClearNoteChart();
+
+	/** Find next note with matching tag within timing window */
+	bool GetNextNoteForTag(FGameplayTag NoteTag, float CurrentTime, FNoteInstance& OutNote);
+
+	/** Mark a note as consumed (prevents re-validation) */
+	void MarkNoteConsumed(const FNoteInstance& Note);
+
+	/** Check if a note has been consumed */
+	bool IsNoteConsumed(const FNoteInstance& Note) const;
+
+	/** Convert frame number to seconds using cached sequence frame rate */
+	float FrameToSeconds(FFrameNumber Frame) const;
+
+	/** Convert seconds to frame number using cached sequence frame rate */
+	FFrameNumber SecondsToFrame(float Seconds) const;
+
+	/** Get current playback time from song player */
+	float GetCurrentPlaybackTime() const;
+
+	/** Create or get the SongPlayer actor and player using static factory method */
+	void EnsureSongPlayerActor();
+
+	/** Get the sequence player from SongPlayerActor with validation */
+	ULevelSequencePlayer* GetSongPlayer() const;
 };

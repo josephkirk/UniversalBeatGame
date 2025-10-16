@@ -1,0 +1,33 @@
+# DA_Jump - Example Note Data Asset
+
+**To Create in Unreal Editor:**
+1. Right-click in Content Browser → Miscellaneous → Data Asset
+2. Choose NoteDataAsset class
+3. Name: DA_Jump
+4. Configure properties as shown below
+
+## Configuration
+
+### Identity
+- **Label**: "Jump"
+- **Note Tag**: Input.Jump
+
+### Timing
+- **Pre Timing**: Quarter (1/4 note) - More lenient for platformer feel
+- **Post Timing**: Half (1/2 note) - Very forgiving, encourages flow
+
+### Visual
+- **Icon Texture**: (Assign a jump/spacebar icon if available)
+
+### Interaction
+- **Interaction Type**: Press
+
+## Purpose
+Jump action for rhythm platformers.
+More forgiving timing to balance precision platforming with rhythm gameplay.
+Extended post-timing window allows players to recover from slightly late inputs.
+
+## Example Use Case
+In a rhythm platformer where players need to time jumps to the beat while
+navigating obstacles. The lenient timing makes the game more accessible while
+still requiring rhythmic awareness.
