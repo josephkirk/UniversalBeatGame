@@ -36,6 +36,7 @@ void UUniversalBeatSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	CachedSequenceFrameRate = FFrameRate(60, 1); // Default 60 FPS
 
 	// SongPlayer actor will be spawned when needed (lazy initialization)
+	EnsureSongPlayerActor();
 
 	// Load default timing curve asset (will be created in T010)
 	// TimingCurve = LoadObject<UCurveFloat>(nullptr, TEXT("/UniversalBeat/Curves/DefaultTimingCurve"));
@@ -347,8 +348,6 @@ float UUniversalBeatSubsystem::GetCurrentBeatPhase() const
 
 float UUniversalBeatSubsystem::CalculateBeatPhase() const
 {
-	// T015: Core beat tracking logic with time dilation and calibration support
-	// T019: Enhanced pause handling (FR-004b/c)
 	if (!GetWorld())
 	{
 		return 0.0f;
@@ -357,34 +356,20 @@ float UUniversalBeatSubsystem::CalculateBeatPhase() const
 	// Check for pause state if respecting time dilation
 	bool bCurrentlyPaused = bRespectTimeDilation && IsPausedState();
 	
-	if (bCurrentlyPaused)
-	{
-		// FR-004c: Beat tracking pauses, but timing checks still function
-		// Return cached phase from when pause started
-		if (!bIsPaused)
-		{
-			// Just entered pause - cache current state
-			bIsPaused = true;
-			CachedPauseTime = GetWorld()->GetTimeSeconds();
-			// Calculate and cache the phase at pause time
-			double CurrentTime = GetWorld()->GetRealTimeSeconds();
-			double CalibrationOffsetSeconds = CalibrationOffsetMs / 1000.0;
-			double AdjustedTime = CurrentTime + CalibrationOffsetSeconds;
-			double SecondsPerBeat = 60.0 / CurrentBPM;
-			double ElapsedBeats = (AdjustedTime - StartTime) / SecondsPerBeat;
-			CachedPausePhase = FMath::Frac(ElapsedBeats);
-		}
-		// Return frozen phase
-		return CachedPausePhase;
-	}
-	else if (bIsPaused)
-	{
-		// Just exited pause - reset flag
-		bIsPaused = false;
-	}
-	
 	// Get current time based on time dilation setting
 	double CurrentTime;
+
+	// Apply calibration offset
+	double CalibrationOffsetSeconds = CalibrationOffsetMs / 1000.0;
+	double AdjustedTime = CurrentTime + CalibrationOffsetSeconds;
+	
+	// Calculate elapsed beats since start
+	double SecondsPerBeat = 60.0 / CurrentBPM;
+	double ElapsedBeats = (AdjustedTime - StartTime) / SecondsPerBeat;
+
+	// Calculate beat phase (0.0 to 1.0 within current beat)
+	float BeatPhase = FMath::Frac(ElapsedBeats);
+	
 	if (bRespectTimeDilation)
 	{
 		CurrentTime = GetWorld()->GetTimeSeconds();  // Dilated time
@@ -393,18 +378,7 @@ float UUniversalBeatSubsystem::CalculateBeatPhase() const
 	{
 		CurrentTime = GetWorld()->GetRealTimeSeconds();  // Real-time (ignores dilation)
 	}
-	
-	// Apply calibration offset
-	double CalibrationOffsetSeconds = CalibrationOffsetMs / 1000.0;
-	double AdjustedTime = CurrentTime + CalibrationOffsetSeconds;
-	
-	// Calculate elapsed beats since start
-	double SecondsPerBeat = 60.0 / CurrentBPM;
-	double ElapsedBeats = (AdjustedTime - StartTime) / SecondsPerBeat;
-	
-	// Calculate beat phase (0.0 to 1.0 within current beat)
-	float BeatPhase = FMath::Frac(ElapsedBeats);
-	
+
 	return BeatPhase;
 }
 
