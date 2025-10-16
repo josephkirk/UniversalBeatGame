@@ -1,0 +1,27 @@
+# DA_RightArrow - Example Note Data Asset
+
+**To Create in Unreal Editor:**
+1. Right-click in Content Browser → Miscellaneous → Data Asset
+2. Choose NoteDataAsset class
+3. Name: DA_RightArrow
+4. Configure properties as shown below
+
+## Configuration
+
+### Identity
+- **Label**: "Right Arrow"
+- **Note Tag**: Input.Right
+
+### Timing
+- **Pre Timing**: Eighth (1/8 note) - Standard responsiveness
+- **Post Timing**: Quarter (1/4 note) - Forgiving on late inputs
+
+### Visual
+- **Icon Texture**: (Assign a right arrow texture if available)
+
+### Interaction
+- **Interaction Type**: Press
+
+## Purpose
+Standard right directional input for rhythm games (DDR-style).
+Balanced timing suitable for normal difficulty.

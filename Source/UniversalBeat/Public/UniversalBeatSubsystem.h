@@ -26,6 +26,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSongStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSongEnded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTrackStarted, int32, TrackIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTrackEnded, int32, TrackIndex);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNoteBeat, FNoteInstance, NoteData);
 
 /**
  * UniversalBeat Subsystem - Game thread only
@@ -426,6 +427,20 @@ public:
 	 */
 	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Song Events")
 	FOnTrackEnded OnTrackEnded;
+
+	/**
+	 * Event fired when a note is triggered during playback.
+	 * Receives the note instance with timing and note data information.
+	 * This fires for every note as it plays, allowing for visual/audio feedback.
+	 * 
+	 * Use cases:
+	 * - Spawn visual note indicators
+	 * - Trigger sound effects
+	 * - Update UI elements
+	 * - Track note approach timing
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Note Events")
+	FOnNoteBeat OnNoteBeat;
 
 private:
 	// ====================================================================

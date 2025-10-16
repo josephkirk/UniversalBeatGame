@@ -2,10 +2,14 @@
 
 #include "MovieSceneNoteChartSection.h"
 #include "NoteDataAsset.h"
+#include "UniversalBeatSubsystem.h"
 #include "Channels/MovieSceneChannelProxy.h"
 #include "EntitySystem/MovieSceneEntityBuilder.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
 #include "Evaluation/MovieSceneEvaluationField.h"
+#include "Engine/Engine.h"
+#include "Engine/World.h"
+#include "Engine/LocalPlayer.h"
 
 UMovieSceneNoteChartSection::UMovieSceneNoteChartSection(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -116,6 +120,29 @@ void UMovieSceneNoteChartSection::ImportEntityImpl(UMovieSceneEntitySystemLinker
 	// The UniversalBeatSubsystem will query this array
 	FNoteInstance RuntimeNote(NoteTime, NoteValue.NoteData);
 	RuntimeNotes.Add(RuntimeNote);
+	
+	// Broadcast OnNoteBeat event to subsystem
+	// Get world from the EntityLinker instead of GetWorld() which doesn't work in this context
+	if (EntityLinker)
+	{
+		UWorld* World = EntityLinker->GetWorld();
+		if (World && World->GetGameInstance())
+		{
+			// Try to get subsystem from first local player
+			if (ULocalPlayer* LocalPlayer = World->GetGameInstance()->GetFirstGamePlayer())
+			{
+				if (UUniversalBeatSubsystem* Subsystem = LocalPlayer->GetSubsystem<UUniversalBeatSubsystem>())
+				{
+					Subsystem->OnNoteBeat.Broadcast(RuntimeNote);
+					
+					if (Subsystem->IsDebugLoggingEnabled())
+					{
+						UE_LOG(LogTemp, Log, TEXT("MovieSceneNoteChartSection::ImportEntityImpl: Broadcasted OnNoteBeat for note at frame %d"), NoteTime.Value);
+					}
+				}
+			}
+		}
+	}
 	
 	UE_LOG(LogTemp, Verbose, TEXT("MovieSceneNoteChartSection::ImportEntityImpl: Note triggered at frame %d with data %s"), 
 		NoteTime.Value, *NoteValue.NoteData->GetName());

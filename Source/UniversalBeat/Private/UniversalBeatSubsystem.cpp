@@ -1376,7 +1376,8 @@ bool UUniversalBeatSubsystem::PlayNoteChartSequence(ULevelSequence* Sequence)
 	}
 
 	// Ensure we have a SongPlayer actor and player
-
+	EnsureSongPlayerActor();
+	
 	if (!SongPlayerActor)
 	{
 		UE_LOG(LogUniversalBeat, Error, TEXT("PlayNoteChartSequence: Failed to create SongPlayer actor"));
@@ -1558,21 +1559,33 @@ void UUniversalBeatSubsystem::EnsureSongPlayerActor()
 	}
 
 	// Use the static factory method to create both player and actor
-	// Note: We pass nullptr for InLevelSequence since we'll set it later via SetSequence()
 	FMovieSceneSequencePlaybackSettings PlaybackSettings;
 	PlaybackSettings.bAutoPlay = false; // Don't auto-play, we'll control playback manually
 	
-	ALevelSequenceActor* OutActor = nullptr;
-	ULevelSequencePlayer* Player = ULevelSequencePlayer::CreateLevelSequencePlayer(
-		World,
-		nullptr, // Sequence will be set later
-		PlaybackSettings,
-		OutActor
-	);
+	// ALevelSequenceActor* OutActor = nullptr;
+	// ULevelSequencePlayer* Player = ULevelSequencePlayer::CreateLevelSequencePlayer(
+	// 	this,
+	// 	nullptr, // Sequence will be set later
+	// 	PlaybackSettings,
+	// 	OutActor
+	// );
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.ObjectFlags |= RF_Transient;
+	SpawnParams.bAllowDuringConstructionScript = true;
+	SpawnParams.Name = FName(TEXT("SongPlayerActor"));
+	// Defer construction for autoplay so that BeginPlay() is called
+	SpawnParams.bDeferConstruction = true;
 
-	if (!OutActor)
+	ALevelSequenceActor* OutActor = World->SpawnActor<ALevelSequenceActor>(SpawnParams);
+	OutActor->SetActorLabel(TEXT("SongPlayerActor"));
+	ULevelSequencePlayer* Player = OutActor->GetSequencePlayer();
+	OutActor->PlaybackSettings = PlaybackSettings;
+	if (!OutActor || !Player)
 	{
-		UE_LOG(LogUniversalBeat, Error, TEXT("EnsureSongPlayerActor: Failed to create SongPlayer actor"));
+		UE_LOG(LogUniversalBeat, Error, TEXT("EnsureSongPlayerActor: Failed to create SongPlayer actor (OutActor=%s, Player=%s)"),
+			OutActor ? TEXT("Valid") : TEXT("NULL"),
+			Player ? TEXT("Valid") : TEXT("NULL"));
 		return;
 	}
 
@@ -1589,7 +1602,10 @@ void UUniversalBeatSubsystem::EnsureSongPlayerActor()
 
 ULevelSequencePlayer* UUniversalBeatSubsystem::GetSongPlayer() const
 {
-	check(IsValid(SongPlayerActor));
+	if (!SongPlayerActor || !IsValid(SongPlayerActor))
+	{
+		return nullptr;
+	}
 
 	return SongPlayerActor->GetSequencePlayer();
 }
