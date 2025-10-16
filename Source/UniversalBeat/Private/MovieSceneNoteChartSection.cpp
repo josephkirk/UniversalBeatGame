@@ -2,8 +2,13 @@
 
 #include "MovieSceneNoteChartSection.h"
 #include "NoteDataAsset.h"
+#include "Channels/MovieSceneChannelProxy.h"
+#include "EntitySystem/MovieSceneEntityBuilder.h"
+#include "EntitySystem/MovieSceneEntitySystemLinker.h"
+#include "Evaluation/MovieSceneEvaluationField.h"
 
-UMovieSceneNoteChartSection::UMovieSceneNoteChartSection()
+UMovieSceneNoteChartSection::UMovieSceneNoteChartSection(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
 {
 	// Set default snap grid to 1/16th note
 	SnapGridResolution = EMusicalNoteValue::Sixteenth;
@@ -13,21 +18,138 @@ UMovieSceneNoteChartSection::UMovieSceneNoteChartSection()
 	
 	// Enable infinite section by default
 	bSupportsInfiniteRange = true;
+
+	// Register note channel with channel proxy
+	FMovieSceneChannelProxyData Channels;
+#if WITH_EDITOR
+	FMovieSceneChannelMetaData NoteMetaData;
+	NoteMetaData.SetIdentifiers("Notes", NSLOCTEXT("MovieSceneNoteChartSection", "NotesText", "Notes"));
+	Channels.Add(NoteChannel, NoteMetaData);
+#else
+	Channels.Add(NoteChannel);
+#endif
+	
+	ChannelProxy = MakeShared<FMovieSceneChannelProxy>(MoveTemp(Channels));
 }
 
-void UMovieSceneNoteChartSection::AddNote(FFrameNumber Timestamp, UNoteDataAsset* NoteData)
+void UMovieSceneNoteChartSection::PostLoad()
+{
+	Super::PostLoad();
+	
+	// Migrate deprecated notes array to channel
+	if (Notes_DEPRECATED.Num() > 0)
+	{
+		TMovieSceneChannelData<FNoteChannelValue> ChannelData = NoteChannel.GetData();
+		
+		for (const FNoteInstance& Note : Notes_DEPRECATED)
+		{
+			FNoteChannelValue Value(Note.NoteData);
+			ChannelData.AddKey(Note.Timestamp, MoveTemp(Value));
+		}
+		
+		// Clear deprecated array after migration
+		Notes_DEPRECATED.Empty();
+		MarkPackageDirty();
+		
+		UE_LOG(LogTemp, Log, TEXT("MovieSceneNoteChartSection: Migrated %d notes from deprecated array to channel"), NoteChannel.GetNumKeys());
+	}
+}
+
+bool UMovieSceneNoteChartSection::PopulateEvaluationFieldImpl(const TRange<FFrameNumber>& EffectiveRange, const FMovieSceneEvaluationFieldEntityMetaData& InMetaData, FMovieSceneEntityComponentFieldBuilder* OutFieldBuilder)
+{
+	// Get channel data to access key indices
+	TMovieSceneChannelData<const FNoteChannelValue> ChannelData = NoteChannel.GetData();
+	TArrayView<const FFrameNumber> AllKeyTimes = ChannelData.GetTimes();
+	TArrayView<const FNoteChannelValue> AllKeyValues = ChannelData.GetValues();
+	
+	if (AllKeyTimes.Num() == 0)
+	{
+		return false;
+	}
+	
+	// Create one-shot entity for each note in the effective range
+	const int32 MetaDataIndex = OutFieldBuilder->AddMetaData(InMetaData);
+	bool bAddedAnyEntities = false;
+	
+	for (int32 KeyIndex = 0; KeyIndex < AllKeyTimes.Num(); ++KeyIndex)
+	{
+		const FFrameNumber NoteTime = AllKeyTimes[KeyIndex];
+		
+		// Only add entities within the effective range
+		if (EffectiveRange.Contains(NoteTime))
+		{
+			// Pass actual key index so ImportEntityImpl can retrieve the correct note
+			OutFieldBuilder->AddOneShotEntity(TRange<FFrameNumber>(NoteTime), this, KeyIndex, MetaDataIndex);
+			bAddedAnyEntities = true;
+		}
+	}
+	
+	return bAddedAnyEntities;
+}
+
+void UMovieSceneNoteChartSection::ImportEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity)
+{
+	// Entity index corresponds to key index in channel
+	const int32 KeyIndex = Params.EntityID;
+	
+	// Retrieve note data from channel
+	TMovieSceneChannelData<const FNoteChannelValue> ChannelData = NoteChannel.GetData();
+	TArrayView<const FNoteChannelValue> KeyValues = ChannelData.GetValues();
+	TArrayView<const FFrameNumber> KeyTimes = ChannelData.GetTimes();
+	
+	if (!KeyValues.IsValidIndex(KeyIndex) || !KeyTimes.IsValidIndex(KeyIndex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("MovieSceneNoteChartSection::ImportEntityImpl: Invalid key index %d"), KeyIndex);
+		return;
+	}
+	
+	const FNoteChannelValue& NoteValue = KeyValues[KeyIndex];
+	const FFrameNumber NoteTime = KeyTimes[KeyIndex];
+	
+	if (!NoteValue.NoteData)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("MovieSceneNoteChartSection::ImportEntityImpl: Note at index %d has no assigned NoteDataAsset"), KeyIndex);
+		return;
+	}
+	
+	// Add note to runtime notes array (existing AddNote behavior)
+	// The UniversalBeatSubsystem will query this array
+	FNoteInstance RuntimeNote(NoteTime, NoteValue.NoteData);
+	RuntimeNotes.Add(RuntimeNote);
+	
+	UE_LOG(LogTemp, Verbose, TEXT("MovieSceneNoteChartSection::ImportEntityImpl: Note triggered at frame %d with data %s"), 
+		NoteTime.Value, *NoteValue.NoteData->GetName());
+}
+
+TOptional<TRange<FFrameNumber>> UMovieSceneNoteChartSection::GetAutoSizeRange() const
+{
+	TRange<FFrameNumber> EffectiveRange = NoteChannel.ComputeEffectiveRange();
+	
+	if (!EffectiveRange.IsEmpty())
+	{
+		return EffectiveRange;
+	}
+	
+	return TOptional<TRange<FFrameNumber>>();
+}
+
+FKeyHandle UMovieSceneNoteChartSection::AddNote(FFrameNumber Timestamp, UNoteDataAsset* NoteData)
 {
 	if (!NoteData)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("MovieSceneNoteChartSection::AddNote: Null NoteData provided"));
-		return;
+		return FKeyHandle::Invalid();
 	}
 
-	FNoteInstance NewNote(Timestamp, NoteData);
-	Notes.Add(NewNote);
+	// Add to channel
+	TMovieSceneChannelData<FNoteChannelValue> ChannelData = NoteChannel.GetData();
+	FNoteChannelValue Value(NoteData);
+	int32 KeyIndex = ChannelData.AddKey(Timestamp, MoveTemp(Value));
+	FKeyHandle Handle = ChannelData.GetHandle(KeyIndex);
 	
-	// Sort after adding
-	SortNotes();
+	// Also add to runtime notes for immediate queries
+	FNoteInstance RuntimeNote(Timestamp, NoteData);
+	RuntimeNotes.Add(RuntimeNote);
 	
 	// Expand section range if needed
 	TRange<FFrameNumber> CurrentRange = GetRange();
@@ -37,74 +159,93 @@ void UMovieSceneNoteChartSection::AddNote(FFrameNumber Timestamp, UNoteDataAsset
 		FFrameNumber NewEnd = FMath::Max(CurrentRange.GetUpperBoundValue(), Timestamp + 1);
 		SetRange(TRange<FFrameNumber>(NewStart, NewEnd));
 	}
-}
-
-void UMovieSceneNoteChartSection::RemoveNote(int32 Index)
-{
-	if (Notes.IsValidIndex(Index))
-	{
-		Notes.RemoveAt(Index);
-	}
-}
-
-void UMovieSceneNoteChartSection::ClearNotes()
-{
-	Notes.Empty();
-}
-
-void UMovieSceneNoteChartSection::SortNotes()
-{
-	Notes.Sort([](const FNoteInstance& A, const FNoteInstance& B)
-	{
-		return A.Timestamp < B.Timestamp;
-	});
-}
-
-TArray<FNoteInstance> UMovieSceneNoteChartSection::GetNotesInRange(FFrameNumber StartFrame, FFrameNumber EndFrame) const
-{
-	TArray<FNoteInstance> Result;
 	
-	for (const FNoteInstance& Note : Notes)
+	return Handle;
+}
+
+bool UMovieSceneNoteChartSection::RemoveNote(FKeyHandle Handle)
+{
+	TMovieSceneChannelData<FNoteChannelValue> ChannelData = NoteChannel.GetData();
+	
+	// Find and remove from channel
+	int32 Index = ChannelData.GetIndex(Handle);
+	if (Index != INDEX_NONE)
 	{
-		if (Note.Timestamp >= StartFrame && Note.Timestamp <= EndFrame)
+		ChannelData.RemoveKey(Index);
+		
+		// Rebuild runtime notes
+		RuntimeNotes.Empty();
+		return true;
+	}
+	
+	return false;
+}
+
+int32 UMovieSceneNoteChartSection::RemoveNotesInRange(FFrameNumber StartFrame, FFrameNumber EndFrame)
+{
+	TMovieSceneChannelData<FNoteChannelValue> ChannelData = NoteChannel.GetData();
+	TArrayView<const FFrameNumber> KeyTimes = ChannelData.GetTimes();
+	
+	TArray<FKeyHandle> HandlesToDelete;
+	
+	for (int32 Idx = 0; Idx < KeyTimes.Num(); ++Idx)
+	{
+		if (KeyTimes[Idx] >= StartFrame && KeyTimes[Idx] <= EndFrame)
 		{
-			Result.Add(Note);
+			HandlesToDelete.Add(ChannelData.GetHandle(Idx));
 		}
 	}
 	
-	return Result;
+	int32 NumRemoved = HandlesToDelete.Num();
+	
+	for (FKeyHandle Handle : HandlesToDelete)
+	{
+		RemoveNote(Handle);
+	}
+	
+	return NumRemoved;
 }
 
-TArray<FNoteInstance> UMovieSceneNoteChartSection::GetNotesByTag(FGameplayTag Tag) const
+void UMovieSceneNoteChartSection::GetNotesInRange(FFrameNumber StartFrame, FFrameNumber EndFrame, TArray<FNoteInstance>& OutNotes) const
 {
-	TArray<FNoteInstance> Result;
+	OutNotes.Empty();
+	
+	TMovieSceneChannelData<const FNoteChannelValue> ChannelData = NoteChannel.GetData();
+	TArrayView<const FFrameNumber> KeyTimes = ChannelData.GetTimes();
+	TArrayView<const FNoteChannelValue> KeyValues = ChannelData.GetValues();
+	
+	for (int32 Idx = 0; Idx < KeyTimes.Num(); ++Idx)
+	{
+		if (KeyTimes[Idx] >= StartFrame && KeyTimes[Idx] <= EndFrame)
+		{
+			if (KeyValues[Idx].NoteData)
+			{
+				OutNotes.Add(FNoteInstance(KeyTimes[Idx], KeyValues[Idx].NoteData));
+			}
+		}
+	}
+}
+
+void UMovieSceneNoteChartSection::GetNotesByTag(FGameplayTag Tag, TArray<FNoteInstance>& OutNotes) const
+{
+	OutNotes.Empty();
 	
 	if (!Tag.IsValid())
 	{
-		return Result;
+		return;
 	}
 	
-	for (const FNoteInstance& Note : Notes)
-	{
-		if (Note.NoteData && Note.NoteData->GetNoteTag() == Tag)
-		{
-			Result.Add(Note);
-		}
-	}
+	TMovieSceneChannelData<const FNoteChannelValue> ChannelData = NoteChannel.GetData();
+	TArrayView<const FFrameNumber> KeyTimes = ChannelData.GetTimes();
+	TArrayView<const FNoteChannelValue> KeyValues = ChannelData.GetValues();
 	
-	return Result;
-}
-
-int32 UMovieSceneNoteChartSection::FindNoteIndex(FFrameNumber Timestamp) const
-{
-	for (int32 i = 0; i < Notes.Num(); ++i)
+	for (int32 Idx = 0; Idx < KeyTimes.Num(); ++Idx)
 	{
-		if (Notes[i].Timestamp == Timestamp)
+		if (KeyValues[Idx].NoteData && KeyValues[Idx].NoteData->GetNoteTag() == Tag)
 		{
-			return i;
+			OutNotes.Add(FNoteInstance(KeyTimes[Idx], KeyValues[Idx].NoteData));
 		}
 	}
-	return -1;
 }
 
 #if WITH_EDITOR
@@ -119,12 +260,10 @@ void UMovieSceneNoteChartSection::PostEditChangeProperty(FPropertyChangedEvent& 
 	
 	const FName PropertyName = PropertyChangedEvent.Property->GetFName();
 	
-	// If notes array changed, ensure they're sorted
-	if (PropertyName == GET_MEMBER_NAME_CHECKED(UMovieSceneNoteChartSection, Notes))
+	// If note channel changed, log it
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(UMovieSceneNoteChartSection, NoteChannel))
 	{
-		SortNotes();
-		
-		UE_LOG(LogTemp, Log, TEXT("MovieSceneNoteChartSection: Notes updated, count = %d"), Notes.Num());
+		UE_LOG(LogTemp, Log, TEXT("MovieSceneNoteChartSection: Note channel updated, count = %d"), NoteChannel.GetNumKeys());
 	}
 	
 	// If snap grid changed, log it

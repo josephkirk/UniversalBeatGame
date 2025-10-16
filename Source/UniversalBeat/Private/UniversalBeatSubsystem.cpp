@@ -1286,8 +1286,8 @@ bool UUniversalBeatSubsystem::LoadNoteChartFromSequence(ULevelSequence* Sequence
 			UMovieSceneNoteChartSection* NoteSection = Cast<UMovieSceneNoteChartSection>(Section);
 			if (NoteSection)
 			{
-				// Add all notes from this section
-				CachedNotesSorted.Append(NoteSection->Notes);
+				// Add all notes from this section's runtime notes
+				CachedNotesSorted.Append(NoteSection->RuntimeNotes);
 			}
 		}
 	}

@@ -23,12 +23,25 @@ public class UniversalBeat : ModuleRules
 				"MovieSceneTracks"
 			}
 		);
-		
-		PrivateDependencyModuleNames.AddRange(
-			new string[]
+		PrivateDependencyModuleNames.AddRange(new string[]
 			{
-				// Add private dependencies here if needed
-			}
-		);
+				"SlateCore",
+				"AnimGraphRuntime",
+				"PropertyPath"
+			});
+		if (Target.bBuildWithEditorOnlyData && Target.bBuildEditor)
+		{
+			PublicDependencyModuleNames.AddRange(new string[]
+				{
+					"BlueprintGraph"
+				});
+			PrivateDependencyModuleNames.AddRange(new string[]
+				{
+					"AnimationBlueprintLibrary",
+					"DataLayerEditor",
+					"EditorFramework",
+					"UnrealEd"
+				});
+		}
 	}
 }
