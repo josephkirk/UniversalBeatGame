@@ -60,4 +60,26 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Timing", meta = (Tooltip = "Get subdivision multiplier for interval calculation."))
 	static int32 GetSubdivisionMultiplier(EBeatSubdivision Subdivision);
+
+	/**
+	 * Check if a beat event falls on a specific subdivision
+	 * 
+	 * Important: The target subdivision must be equal to or coarser than the broadcast subdivision.
+	 * - Broadcasting at Sixteenth: Can detect Whole, Half, Quarter, Eighth, Sixteenth
+	 * - Broadcasting at Eighth: Can detect Whole, Half, Quarter, Eighth (NOT Sixteenth)
+	 * - Broadcasting at Quarter: Can detect Whole, Half, Quarter (NOT Eighth or Sixteenth)
+	 * 
+	 * Examples when broadcasting at Sixteenth rate:
+	 * - Whole: SubdivisionIndex == 0 (only index 0)
+	 * - Half: SubdivisionIndex % 8 == 0 (indices 0, 8)
+	 * - Quarter: SubdivisionIndex % 4 == 0 (indices 0, 4, 8, 12)
+	 * - Eighth: SubdivisionIndex % 2 == 0 (indices 0, 2, 4, 6, 8, 10, 12, 14)
+	 * - Sixteenth: Always true (every index: 0-15)
+	 * 
+	 * @param BeatEvent The beat event data to check (contains SubdivisionType and SubdivisionIndex)
+	 * @param TargetSubdivision The subdivision to check against
+	 * @return True if the beat event falls on the target subdivision, false if target is finer than broadcast rate
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Timing", meta = (Tooltip = "Check if beat event is on target subdivision. Target must be equal to or coarser than broadcast subdivision."))
+	static bool IsNoteSubdivision(const FBeatEventData& BeatEvent, EBeatSubdivision TargetSubdivision);
 };
