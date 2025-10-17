@@ -81,22 +81,8 @@ bool UUniversalBeatFunctionLibrary::IsNoteSubdivision(const FBeatEventData& Beat
 		return false;
 	}
 	
-	// Check if the target subdivision is coarser than or equal to the current broadcast subdivision
-	// We can only detect subdivisions that are coarser than or equal to what's being broadcast
 	int32 BroadcastTicks = GetTicksForSubdivision(BeatEvent.SubdivisionType);
-	if (TicksPerSubdivision > BroadcastTicks)
-	{
-		// Target is finer than broadcast - cannot detect
-		// E.g., asking for Eighth notes when only broadcasting Quarter notes
-		return false;
-	}
-	
-	// If target matches the broadcast subdivision, always true
-	if (TargetSubdivision == BeatEvent.SubdivisionType)
-	{
-		return true;
-	}
-	
+
 	// Check if the SubdivisionIndex aligns with the target subdivision
 	// The SubdivisionIndex cycles based on the broadcast subdivision rate:
 	// - Broadcasting at Sixteenth: SubdivisionIndex cycles 0-15

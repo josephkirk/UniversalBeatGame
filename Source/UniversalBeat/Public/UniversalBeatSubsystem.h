@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Subsystems/LocalPlayerSubsystem.h"
+#include "Subsystems/WorldSubsystem.h"
 #include "UniversalBeatTypes.h"
 #include "Curves/CurveFloat.h"
 #include "Engine/TimerHandle.h"
@@ -56,7 +56,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNoteBeat, FNoteInstance, NoteData
  * Uses a dedicated "SongPlayer" LevelSequenceActor for all note chart playback.
  */
 UCLASS()
-class UNIVERSALBEAT_API UUniversalBeatSubsystem : public ULocalPlayerSubsystem
+class UNIVERSALBEAT_API UUniversalBeatSubsystem : public UWorldSubsystem
 {
 	GENERATED_BODY()
 

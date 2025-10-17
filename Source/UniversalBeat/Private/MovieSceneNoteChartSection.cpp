@@ -128,17 +128,14 @@ void UMovieSceneNoteChartSection::ImportEntityImpl(UMovieSceneEntitySystemLinker
 		UWorld* World = EntityLinker->GetWorld();
 		if (World && World->GetGameInstance())
 		{
-			// Try to get subsystem from first local player
-			if (ULocalPlayer* LocalPlayer = World->GetGameInstance()->GetFirstGamePlayer())
+			
+			if (UUniversalBeatSubsystem* Subsystem = World->GetSubsystem<UUniversalBeatSubsystem>())
 			{
-				if (UUniversalBeatSubsystem* Subsystem = LocalPlayer->GetSubsystem<UUniversalBeatSubsystem>())
-				{
-					Subsystem->OnNoteBeat.Broadcast(RuntimeNote);
+				Subsystem->OnNoteBeat.Broadcast(RuntimeNote);
 					
-					if (Subsystem->IsDebugLoggingEnabled())
-					{
-						UE_LOG(LogTemp, Log, TEXT("MovieSceneNoteChartSection::ImportEntityImpl: Broadcasted OnNoteBeat for note at frame %d"), NoteTime.Value);
-					}
+				if (Subsystem->IsDebugLoggingEnabled())
+				{
+					UE_LOG(LogTemp, Log, TEXT("MovieSceneNoteChartSection::ImportEntityImpl: Broadcasted OnNoteBeat for note at frame %d"), NoteTime.Value);
 				}
 			}
 		}
