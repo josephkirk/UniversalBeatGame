@@ -582,9 +582,6 @@ private:
 	/** Get timer rate in seconds (1/16th note interval) */
 	float GetTimerRate() const;
 
-	/** Get tick divisor for a given subdivision level */
-	int32 GetTicksForSubdivision(EBeatSubdivision Subdivision) const;
-
 	/** Recreate timer with current or new rate */
 	void RecreateTimerWithNewRate();
 
@@ -604,9 +601,6 @@ private:
 	void PresentCalibrationPrompt();
 	void ProcessCalibrationInput(float TimingValue);
 	void CompleteCalibrationSequence();
-
-	/** Get subdivision multiplier from enum */
-	int GetSubdivisionMultiplier(EBeatSubdivision Subdivision) const;
 	
 	/** Check if game is currently paused */
 	bool IsPausedState() const;

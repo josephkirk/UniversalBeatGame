@@ -43,4 +43,21 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Timing", meta = (Tooltip = "Calculate timing windows in seconds for note validation."))
 	static void CalculateTimingWindows(EMusicalNoteValue PreTiming, EMusicalNoteValue PostTiming, float BPM, float& OutPreSeconds, float& OutPostSeconds);
+
+	/**
+	 * Get the number of ticks per broadcast for a given beat subdivision
+	 * Internal subdivision is always 16 (sixteenth notes)
+	 * @param Subdivision The beat subdivision level
+	 * @return Number of ticks between broadcasts (0 for None, 16 for Whole, 8 for Half, 4 for Quarter, 2 for Eighth, 1 for Sixteenth)
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Timing", meta = (Tooltip = "Get tick divisor for beat subdivision."))
+	static int32 GetTicksForSubdivision(EBeatSubdivision Subdivision);
+
+	/**
+	 * Get the subdivision multiplier for timer interval calculation
+	 * @param Subdivision The beat subdivision level
+	 * @return Multiplier relative to whole beat (1 for None/Whole, 2 for Half, 4 for Quarter, 8 for Eighth, 16 for Sixteenth)
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Timing", meta = (Tooltip = "Get subdivision multiplier for interval calculation."))
+	static int32 GetSubdivisionMultiplier(EBeatSubdivision Subdivision);
 };

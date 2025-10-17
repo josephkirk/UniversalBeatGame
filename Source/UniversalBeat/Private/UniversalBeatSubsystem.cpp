@@ -254,7 +254,7 @@ void UUniversalBeatSubsystem::EnableBeatBroadcasting(EBeatSubdivision Subdivisio
 	if (bDebugLoggingEnabled)
 	{
 		UE_LOG(LogUniversalBeat, Log, TEXT("Beat broadcasting enabled - Subdivision:%d (filtering on %d-tick boundaries)"), 
-			(int32)Subdivision, GetTicksForSubdivision(Subdivision));
+			(int32)Subdivision, UUniversalBeatFunctionLibrary::GetTicksForSubdivision(Subdivision));
 	}
 }
 
@@ -315,28 +315,6 @@ float UUniversalBeatSubsystem::GetTimerRate() const
 {
 	// T006: Return timer rate for Sixteenth subdivision (1/16th notes)
 	return (60.0f / GetBPM()) / InternalSubdivision + (GetCalibrationOffset() / 1000.0f);
-}
-
-int32 UUniversalBeatSubsystem::GetTicksForSubdivision(EBeatSubdivision Subdivision) const
-{
-	// T007: Map subdivision enum to tick divisor
-	switch (Subdivision)
-	{
-	case EBeatSubdivision::None:
-		return 0;  // No broadcasts
-	case EBeatSubdivision::Whole:
-		return 16;  // Every 16 ticks = whole beat
-	case EBeatSubdivision::Half:
-		return 8;   // Every 8 ticks = half beat
-	case EBeatSubdivision::Quarter:
-		return 4;   // Every 4 ticks = quarter beat
-	case EBeatSubdivision::Eighth:
-		return 2;   // Every 2 ticks = eighth beat
-	case EBeatSubdivision::Sixteenth:
-		return 1;   // Every tick = sixteenth beat
-	default:
-		return 0;
-	}
 }
 
 void UUniversalBeatSubsystem::RecreateTimerWithNewRate()
@@ -576,7 +554,7 @@ void UUniversalBeatSubsystem::BroadcastBeatEvent()
 	}
 	
 	// Get ticks per broadcast for current subdivision
-	int32 TicksPerBroadcast = GetTicksForSubdivision(CurrentSubdivision);
+	int32 TicksPerBroadcast = UUniversalBeatFunctionLibrary::GetTicksForSubdivision(CurrentSubdivision);
 	
 	// Check if we should broadcast on this tick
 	if (TicksPerBroadcast > 0 && (CurrentBeatTick % TicksPerBroadcast == 0))
@@ -662,20 +640,6 @@ void UUniversalBeatSubsystem::CompleteCalibrationSequence()
 	CalibrationOffsets.Empty();
 	CalibrationPromptsRemaining = 0;
 	CalibrationTotalPrompts = 0;
-}
-
-int UUniversalBeatSubsystem::GetSubdivisionMultiplier(EBeatSubdivision Subdivision) const
-{
-	// T034: Get subdivision multiplier for timer interval calculation
-	switch (Subdivision)
-	{
-		case EBeatSubdivision::None:    return 1;
-		case EBeatSubdivision::Half:    return 2;
-		case EBeatSubdivision::Quarter: return 4;
-		case EBeatSubdivision::Eighth:  return 8;
-		case EBeatSubdivision::Sixteenth:  return 16;
-		default: return 1;
-	}
 }
 
 bool UUniversalBeatSubsystem::IsPausedState() const
