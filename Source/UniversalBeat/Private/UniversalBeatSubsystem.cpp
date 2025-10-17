@@ -581,8 +581,10 @@ void UUniversalBeatSubsystem::BroadcastBeatEvent()
 	// Check if we should broadcast on this tick
 	if (TicksPerBroadcast > 0 && (CurrentBeatTick % TicksPerBroadcast == 0))
 	{
-		// Calculate subdivision index for event data
-		int32 SubdivisionIndex = CurrentBeatTick % GetSubdivisionMultiplier(CurrentSubdivision);
+		// Calculate subdivision index relative to CurrentSubdivision for event data. It should count from 0 to 7 if CurrentSubdivision is 8th beat and so on
+		// Use modulo to cycle the index within each beat (e.g., 0-7 for eighth notes, 0-3 for quarter notes)
+		int32 SubdivisionsPerBeat = InternalSubdivision / TicksPerBroadcast;
+		int32 SubdivisionIndex = (CurrentBeatTick / TicksPerBroadcast) % SubdivisionsPerBeat;
 		// Get current beat phase and number
 		float CurrentPhase = GetCurrentBeatPhase();
 		int32 CurrentBeatNum = GetCurrentBeatNumber();
