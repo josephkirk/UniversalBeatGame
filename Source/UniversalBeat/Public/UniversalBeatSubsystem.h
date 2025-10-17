@@ -22,6 +22,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBeat, FBeatEventData, BeatData);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCalibrationComplete, float, CalculatedOffsetMs, bool, bSuccess);
 
 // Note chart system event delegates
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBPMChanged, int32, BPM);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSongStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSongEnded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTrackStarted, int32, TrackIndex);
@@ -34,15 +35,25 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNoteBeat, FNoteInstance, NoteData
  * Genre-agnostic rhythm game system providing beat tracking, timing checks,
  * and event-driven integration for Blueprint-based rhythm mechanics.
  * 
- * IMPORTANT: This subsystem must only be accessed from the game thread.
+ * **Architecture (v1.1 - Timer-Based System)**:
+ * - Universal Beat Timer runs at hardcoded Sixteenth note rate
+ * - Beat broadcasts and timing checks synchronized via single timer source
+ * - BeatPhase calculated from GetTimerRemaining() for symmetric timing windows
+ * - Timing curves evaluated with abs(BeatPhase) for equal early/late scoring
+ * 
+ * **Thread Safety**:
+ * This subsystem must only be accessed from the game thread.
  * Do not call subsystem methods from async tasks or other threads.
  * 
- * Performance Requirements:
+ * **Performance Requirements**:
  * - 30+ FPS: Full timing accuracy maintained
- * - <30 FPS: Timing accuracy may degrade below specification
+ * - <30 FPS: Timing accuracy may degrade, warning logged once per session
  * - 60+ FPS: Optimal performance target
+ * - Timer callback overhead: <0.05ms per callback
+ * - Timing check overhead: <0.1ms per check (100+ checks/frame supported)
  * 
- * Note: Uses a dedicated "SongPlayer" LevelSequenceActor for all note chart playback.
+ * **Note Chart System**:
+ * Uses a dedicated "SongPlayer" LevelSequenceActor for all note chart playback.
  */
 UCLASS()
 class UNIVERSALBEAT_API UUniversalBeatSubsystem : public ULocalPlayerSubsystem
@@ -60,14 +71,17 @@ public:
 
 	/**
 	 * Set the beats per minute for rhythm tracking.
-	 * Resets start time to prevent phase discontinuity.
 	 * 
-	 * @param NewBPM Desired tempo (must be > 0, practical range 20-400)
+	 * BPM changes are QUEUED and applied at the next whole beat boundary to avoid phase discontinuity.
+	 * Maximum latency is one timer cycle (~312ms @ 120 BPM for Sixteenth subdivision).
 	 * 
-	 * If invalid (<=0), logs error and resets to default 120 BPM.
-	 * Logs warning if outside typical range (60-240).
+	 * Validation rules:
+	 * - Invalid values (<=0, NaN, Inf): Logs error, resets to 120 BPM default
+	 * - Extreme values (<20 or >400): Logs warning, clamps to [20, 400] range
+	 * 
+	 * @param NewBPM Desired tempo (practical range 20-400 BPM)
 	 */
-	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Configuration", meta = (Tooltip = "Set the beats per minute. Invalid values reset to 120 BPM."))
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Configuration", meta = (Tooltip = "Set BPM (queued until next whole beat). Valid range: 20-400 BPM."))
 	void SetBPM(float NewBPM);
 
 	/**
@@ -131,11 +145,17 @@ public:
 
 	/**
 	 * Set the curve asset used to calculate timing accuracy from beat phase.
-	 * Curve input [0.0-1.0] = position in beat cycle, output [0.0-1.0] = accuracy.
 	 * 
-	 * @param NewCurve Curve asset (null will use linear fallback)
+	 * The curve is evaluated with abs(BeatPhase) as input, creating symmetric timing windows:
+	 * - X-axis (Input): 0.0 = perfect timing (beat peak), 1.0 = missed timing (beat edges)
+	 * - Y-axis (Output): Designer-defined accuracy score (typical "perfect" range: 0.85-1.0)
+	 * 
+	 * Example: A curve with Y=1.0 at X=0.0 dropping to Y=0.85 at X=0.1 gives a tight perfect window.
+	 * Early and late inputs at the same distance from the peak (e.g., 25% and 75%) will score identically.
+	 * 
+	 * @param NewCurve Curve asset (null will use linear fallback: TimingValue = 1.0 - CurveInput)
 	 */
-	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Timing", meta = (Tooltip = "Set timing curve asset. Null uses linear fallback."))
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Timing", meta = (Tooltip = "Set timing curve asset for symmetric timing windows. Curve input: abs(BeatPhase) where 0=perfect, 1=missed. Null uses linear fallback."))
 	void SetTimingCurve(UCurveFloat* NewCurve);
 
 	/**
@@ -360,10 +380,14 @@ public:
 
 	/**
 	 * Get the current position within the beat cycle.
+	 * Returns normalized beat phase synchronized with Universal Beat Timer.
 	 * 
-	 * @return Beat phase: 0.0 = start of beat, 0.5 = on beat, 1.0 = end of beat
+	 * @return Beat phase: -1.0 = beat edge (timer just fired), 0.0 = beat peak (perfect timing), +1.0 = beat edge (timer about to fire)
+	 * 
+	 * Note: This value is synchronized with beat broadcasting and timing checks.
+	 * Use abs(BeatPhase) to get distance from peak for symmetric timing windows.
 	 */
-	UFUNCTION(BlueprintPure, Category = "UniversalBeat|Utility", meta = (Tooltip = "Get current beat phase (0.0-1.0 within beat)."))
+	UFUNCTION(BlueprintPure, Category = "UniversalBeat|Utility", meta = (Tooltip = "Get current beat phase (-1.0 to +1.0). -1.0=edge, 0.0=peak, +1.0=edge"))
 	float GetCurrentBeatPhase() const;
 
 	// ====================================================================
@@ -450,11 +474,14 @@ private:
 	/** Current beats per minute */
 	float CurrentBPM = 120.0f;
 
+	/** Queued BPM change awaiting next timer cycle completion */
+	float PendingBPM = 0.0f;
+
+	/** Counter for timer fires since subsystem start (for subdivision filtering) */
+	int32 CurrentBeatTick = 0;
+
 	/** Whether beat timing follows time dilation */
 	bool bRespectTimeDilation = false;
-
-	/** Absolute time when beat tracking started (from FPlatformTime::Seconds) */
-	double StartTime = 0.0;
 
 	/** Timing curve asset for accuracy calculation */
 	UPROPERTY()
@@ -469,13 +496,17 @@ private:
 	/** Current subdivision level for broadcasting */
 	EBeatSubdivision CurrentSubdivision = EBeatSubdivision::None;
 
+	/** Current subdivision level for beat timing */
+	uint8 InternalSubdivision = 16;
+
 	/** Whether debug logging is enabled */
 	bool bDebugLoggingEnabled = false;
 
-	/** Timer handle for drift compensation (1 second intervals) */
-	FTimerHandle DriftCompensationTimer;
+	/** Event fired when BPM changes */
+	UPROPERTY(BlueprintAssignable, Category = "UniversalBeat|Events")
+	FOnBPMChanged OnBPMChanged;
 
-	/** Timer handle for beat broadcasting */
+	/** Timer handle for beat broadcasting (Universal Beat Timer) */
 	FTimerHandle BeatBroadcastTimer;
 
 	/** Timer handle for calibration sequence */
@@ -548,6 +579,15 @@ private:
 	// Internal Helper Functions
 	// ====================================================================
 
+	/** Get timer rate in seconds (1/16th note interval) */
+	float GetTimerRate() const;
+
+	/** Get tick divisor for a given subdivision level */
+	int32 GetTicksForSubdivision(EBeatSubdivision Subdivision) const;
+
+	/** Recreate timer with current or new rate */
+	void RecreateTimerWithNewRate();
+
 	/** Calculate current beat phase (0.0-1.0 within beat) */
 	float CalculateBeatPhase() const;
 
@@ -556,9 +596,6 @@ private:
 
 	/** Internal timing check implementation shared by label and tag versions */
 	float CheckBeatTimingInternal(FName LabelName, FGameplayTag InputTag);
-
-	/** Periodic drift compensation callback (1 second intervals) */
-	void RealignBeatTracking();
 
 	/** Beat broadcasting callback */
 	void BroadcastBeatEvent();
@@ -569,7 +606,7 @@ private:
 	void CompleteCalibrationSequence();
 
 	/** Get subdivision multiplier from enum */
-	float GetSubdivisionMultiplier(EBeatSubdivision Subdivision) const;
+	int GetSubdivisionMultiplier(EBeatSubdivision Subdivision) const;
 	
 	/** Check if game is currently paused */
 	bool IsPausedState() const;

@@ -21,9 +21,10 @@ void UUniversalBeatSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
-	// T016: Set default values
+	// T009: Set default values
 	CurrentBPM = 120.0f;
-	StartTime = FPlatformTime::Seconds();
+	PendingBPM = 0.0f;
+	CurrentBeatTick = 0;
 	CalibrationOffsetMs = 0.0f;
 	bRespectTimeDilation = false;
 	bBeatBroadcastingEnabled = false;
@@ -38,22 +39,10 @@ void UUniversalBeatSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// SongPlayer actor will be spawned when needed (lazy initialization)
 	EnsureSongPlayerActor();
 
-	// Load default timing curve asset (will be created in T010)
-	// TimingCurve = LoadObject<UCurveFloat>(nullptr, TEXT("/UniversalBeat/Curves/DefaultTimingCurve"));
-	
-	// T018: Start periodic drift compensation timer (runs continuously)
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().SetTimer(
-			DriftCompensationTimer,
-			this,
-			&UUniversalBeatSubsystem::RealignBeatTracking,
-			1.0f,
-			true  // Loop indefinitely
-		);
-	}
+	// T009: Start Universal Beat Timer immediately at Sixteenth rate
+	RecreateTimerWithNewRate();
 
-	UE_LOG(LogUniversalBeat, Log, TEXT("UniversalBeatSubsystem initialized - BPM: %.1f, StartTime: %.3f"), CurrentBPM, StartTime);
+	UE_LOG(LogUniversalBeat, Log, TEXT("UniversalBeatSubsystem initialized - BPM: %.1f, Timer started at Sixteenth rate"), CurrentBPM);
 }
 
 void UUniversalBeatSubsystem::Deinitialize()
@@ -65,16 +54,23 @@ void UUniversalBeatSubsystem::Deinitialize()
 		SongPlayerActor = nullptr;
 	}
 
-	// T017: Clean up timers
+	// T010: Pause timers instead of clearing (preserves calibration state)
 	if (UWorld* World = GetWorld())
 	{
-		World->GetTimerManager().ClearTimer(DriftCompensationTimer);
-		World->GetTimerManager().ClearTimer(BeatBroadcastTimer);
-		World->GetTimerManager().ClearTimer(CalibrationTimer);
+		FTimerManager& TimerManager = World->GetTimerManager();
+		
+		// Pause Universal Beat Timer
+		if (TimerManager.IsTimerActive(BeatBroadcastTimer))
+		{
+			TimerManager.PauseTimer(BeatBroadcastTimer);
+		}
+		
+		// Clear calibration timer (transient state)
+		TimerManager.ClearTimer(CalibrationTimer);
 	}
 	
 	Super::Deinitialize();
-	UE_LOG(LogUniversalBeat, Log, TEXT("UniversalBeatSubsystem deinitialized"));
+	UE_LOG(LogUniversalBeat, Log, TEXT("UniversalBeatSubsystem deinitialized - Timer paused"));
 }
 
 // ====================================================================
@@ -83,33 +79,34 @@ void UUniversalBeatSubsystem::Deinitialize()
 
 void UUniversalBeatSubsystem::SetBPM(float NewBPM)
 {
-	// T011: Validate BPM and reset to default 120 if invalid
-	if (NewBPM <= 0.0f)
+	// T028: Validate BPM with clamping and queuing
+	
+	// Check for invalid values
+	if (NewBPM <= 0.0f || !FMath::IsFinite(NewBPM))
 	{
-		UE_LOG(LogUniversalBeat, Error, TEXT("Invalid BPM value %.2f rejected, resetting to default 120"), NewBPM);
+		UE_LOG(LogUniversalBeat, Error, TEXT("Invalid BPM value %.2f rejected (<=0, NaN, or Inf), resetting to default 120"), NewBPM);
 		CurrentBPM = 120.0f;
-		StartTime = FPlatformTime::Seconds();
+		PendingBPM = 0.0f;
+		RecreateTimerWithNewRate();
 		return;
 	}
 	
-	// Validate practical range (warning only, not enforced)
+	// Check for extreme values and clamp
 	if (NewBPM < 20.0f || NewBPM > 400.0f)
 	{
-		UE_LOG(LogUniversalBeat, Warning, TEXT("BPM %.2f is outside practical range [20-400]"), NewBPM);
+		UE_LOG(LogUniversalBeat, Warning, TEXT("BPM %.2f is outside practical range [20-400], clamping"), NewBPM);
+		NewBPM = FMath::Clamp(NewBPM, 20.0f, 400.0f);
 	}
 	
-	// Validate typical range (warning only)
-	if (NewBPM < 60.0f || NewBPM > 240.0f)
+	// Only queue if BPM actually changed
+	if (NewBPM != CurrentBPM)
 	{
-		UE_LOG(LogUniversalBeat, Warning, TEXT("BPM %.2f is outside typical range [60-240]"), NewBPM);
-	}
-	
-	CurrentBPM = NewBPM;
-	StartTime = FPlatformTime::Seconds();  // Reset start time to prevent phase discontinuity
-	
-	if (bDebugLoggingEnabled)
-	{
-		UE_LOG(LogUniversalBeat, Log, TEXT("BPM changed to %.2f, StartTime reset to %.3f"), CurrentBPM, StartTime);
+		PendingBPM = NewBPM;
+		
+		if (bDebugLoggingEnabled)
+		{
+			UE_LOG(LogUniversalBeat, Log, TEXT("BPM change queued: %.2f (will apply at next whole beat)"), NewBPM);
+		}
 	}
 }
 
@@ -188,7 +185,7 @@ UCurveFloat* UUniversalBeatSubsystem::GetTimingCurve() const
 
 void UUniversalBeatSubsystem::SetCalibrationOffset(float OffsetMs)
 {
-	// T030: Validate and set calibration offset (FR-019a/b)
+	// T030: Validate and set calibration offset with timer recreation
 	float ClampedOffset = FMath::Clamp(OffsetMs, -200.0f, 200.0f);
 	
 	if (ClampedOffset != OffsetMs)
@@ -203,9 +200,13 @@ void UUniversalBeatSubsystem::SetCalibrationOffset(float OffsetMs)
 	
 	CalibrationOffsetMs = ClampedOffset;
 	
+	// Recreate timer with new offset as initial delay
+	// Note: This causes a brief timing discontinuity, acceptable during calibration
+	RecreateTimerWithNewRate();
+	
 	if (bDebugLoggingEnabled)
 	{
-		UE_LOG(LogUniversalBeat, Log, TEXT("Calibration offset set to %.2fms"), CalibrationOffsetMs);
+		UE_LOG(LogUniversalBeat, Log, TEXT("Calibration offset set to %.2fms - Timer recreated with adjusted initial delay"), CalibrationOffsetMs);
 	}
 }
 
@@ -245,50 +246,28 @@ void UUniversalBeatSubsystem::RunCalibrationSequence(int32 NumPrompts)
 
 void UUniversalBeatSubsystem::EnableBeatBroadcasting(EBeatSubdivision Subdivision)
 {
-	// T034: Enable beat broadcasting with subdivisions
+	// T024: Enable beat broadcasting with subdivision filtering
+	// Timer always runs at Sixteenth rate; this just controls which timer ticks fire OnBeat events
 	bBeatBroadcastingEnabled = true;
 	CurrentSubdivision = Subdivision;
 	
-	if (!GetWorld())
-	{
-		UE_LOG(LogUniversalBeat, Warning, TEXT("Cannot enable beat broadcasting - no valid world"));
-		return;
-	}
-	
-	// Calculate timer interval based on subdivision
-	float SubdivisionMultiplier = GetSubdivisionMultiplier(Subdivision);
-	float SecondsPerBeat = 60.0f / CurrentBPM;
-	float TimerInterval = SecondsPerBeat / SubdivisionMultiplier;
-	
-	// Start timer
-	GetWorld()->GetTimerManager().SetTimer(
-		BeatBroadcastTimer,
-		this,
-		&UUniversalBeatSubsystem::BroadcastBeatEvent,
-		TimerInterval,
-		true  // Loop
-	);
-	
 	if (bDebugLoggingEnabled)
 	{
-		UE_LOG(LogUniversalBeat, Log, TEXT("Beat broadcasting enabled - Subdivision:%d Interval:%.3fs"), 
-			(int32)Subdivision, TimerInterval);
+		UE_LOG(LogUniversalBeat, Log, TEXT("Beat broadcasting enabled - Subdivision:%d (filtering on %d-tick boundaries)"), 
+			(int32)Subdivision, GetTicksForSubdivision(Subdivision));
 	}
 }
 
 void UUniversalBeatSubsystem::DisableBeatBroadcasting()
 {
-	// T035: Disable beat broadcasting
+	// T025: Disable beat broadcasting
+	// Timer continues running for timing checks; just stop firing OnBeat events
 	bBeatBroadcastingEnabled = false;
-	
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(BeatBroadcastTimer);
-	}
+	CurrentSubdivision = EBeatSubdivision::None;
 	
 	if (bDebugLoggingEnabled)
 	{
-		UE_LOG(LogUniversalBeat, Log, TEXT("Beat broadcasting disabled"));
+		UE_LOG(LogUniversalBeat, Log, TEXT("Beat broadcasting disabled - Timer continues for timing checks"));
 	}
 }
 
@@ -317,23 +296,9 @@ bool UUniversalBeatSubsystem::IsDebugLoggingEnabled() const
 
 int32 UUniversalBeatSubsystem::GetCurrentBeatNumber() const
 {
-	// T024: Calculate beat number from elapsed time
-	if (!GetWorld())
-	{
-		return 0;
-	}
-	
-	double CurrentTime = bRespectTimeDilation 
-		? GetWorld()->GetTimeSeconds() 
-		: GetWorld()->GetRealTimeSeconds();
-	
-	double CalibrationOffsetSeconds = CalibrationOffsetMs / 1000.0;
-	double AdjustedTime = CurrentTime + CalibrationOffsetSeconds;
-	
-	double SecondsPerBeat = 60.0 / CurrentBPM;
-	double ElapsedBeats = (AdjustedTime - StartTime) / SecondsPerBeat;
-	
-	return FMath::FloorToInt(ElapsedBeats);
+	// Calculate beat number from current tick counter
+	// Since timer ticks at InternalSubdivision default to Sixteenth rate (16 ticks per beat)
+	return CurrentBeatTick / InternalSubdivision;
 }
 
 float UUniversalBeatSubsystem::GetCurrentBeatPhase() const
@@ -346,39 +311,129 @@ float UUniversalBeatSubsystem::GetCurrentBeatPhase() const
 // Internal Helper Functions
 // ====================================================================
 
+float UUniversalBeatSubsystem::GetTimerRate() const
+{
+	// T006: Return timer rate for Sixteenth subdivision (1/16th notes)
+	return (60.0f / GetBPM()) / InternalSubdivision + (GetCalibrationOffset() / 1000.0f);
+}
+
+int32 UUniversalBeatSubsystem::GetTicksForSubdivision(EBeatSubdivision Subdivision) const
+{
+	// T007: Map subdivision enum to tick divisor
+	switch (Subdivision)
+	{
+	case EBeatSubdivision::None:
+		return 0;  // No broadcasts
+	case EBeatSubdivision::Whole:
+		return 16;  // Every 16 ticks = whole beat
+	case EBeatSubdivision::Half:
+		return 8;   // Every 8 ticks = half beat
+	case EBeatSubdivision::Quarter:
+		return 4;   // Every 4 ticks = quarter beat
+	case EBeatSubdivision::Eighth:
+		return 2;   // Every 2 ticks = eighth beat
+	case EBeatSubdivision::Sixteenth:
+		return 1;   // Every tick = sixteenth beat
+	default:
+		return 0;
+	}
+}
+
+void UUniversalBeatSubsystem::RecreateTimerWithNewRate()
+{
+	// T008: Centralized timer recreation logic
+	if (!GetWorld())
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	FTimerManager& TimerManager = World->GetTimerManager();
+
+	// Clear existing timer
+	if (TimerManager.IsTimerActive(BeatBroadcastTimer))
+	{
+		TimerManager.ClearTimer(BeatBroadcastTimer);
+	}
+
+	// Calculate new timer rate (Sixteenth note intervals)
+	float TimerRate = GetTimerRate();
+
+	// Create new timer with appropriate time mode
+	if (bRespectTimeDilation)
+	{
+		TimerManager.SetTimer(
+			BeatBroadcastTimer,
+			this,
+			&UUniversalBeatSubsystem::BroadcastBeatEvent,
+			TimerRate,
+			true,  // Loop
+			0
+		);
+	}
+	else
+	{
+		TimerManager.SetTimerForNextTick([this, TimerRate, World]()
+		{
+			World->GetTimerManager().SetTimer(
+				BeatBroadcastTimer,
+				this,
+				&UUniversalBeatSubsystem::BroadcastBeatEvent,
+				TimerRate,
+				true,  // Loop
+				0.0f
+			);
+		});
+	}
+
+	// Reset tick counter when timer is recreated
+	CurrentBeatTick = 0;
+
+	if (bDebugLoggingEnabled)
+	{
+		UE_LOG(LogUniversalBeat, Log, TEXT("Timer recreated: Rate=%.6f, InitialDelay=%.6f, BPM=%.2f"),
+			TimerRate, 0.0f, CurrentBPM);
+	}
+}
+
 float UUniversalBeatSubsystem::CalculateBeatPhase() const
 {
+	// T012: Calculate BeatPhase from Universal Beat Timer's remaining time
+	// IMPORTANT: Must be called from game thread only
+	
 	if (!GetWorld())
 	{
 		return 0.0f;
 	}
 	
-	// Check for pause state if respecting time dilation
-	bool bCurrentlyPaused = bRespectTimeDilation && IsPausedState();
+	UWorld* World = GetWorld();
+	FTimerManager& TimerManager = World->GetTimerManager();
 	
-	// Get current time based on time dilation setting
-	double CurrentTime = 0.0;;
-
-	// Apply calibration offset
-	double CalibrationOffsetSeconds = CalibrationOffsetMs / 1000.0;
-	double AdjustedTime = CurrentTime + CalibrationOffsetSeconds;
-	
-	// Calculate elapsed beats since start
-	double SecondsPerBeat = 60.0 / CurrentBPM;
-	double ElapsedBeats = (AdjustedTime - StartTime) / SecondsPerBeat;
-
-	// Calculate beat phase (0.0 to 1.0 within current beat)
-	float BeatPhase = FMath::Frac(ElapsedBeats);
-	
-	if (bRespectTimeDilation)
+	// Check if timer is active
+	if (!TimerManager.IsTimerActive(BeatBroadcastTimer))
 	{
-		CurrentTime = GetWorld()->GetTimeSeconds();  // Dilated time
+		// Timer not started yet, return default
+		return -1.0f;
 	}
-	else
-	{
-		CurrentTime = GetWorld()->GetRealTimeSeconds();  // Real-time (ignores dilation)
-	}
+	
+	// Get remaining time until next timer fire
+	float TimerRemaining = TimerManager.GetTimerRemaining(BeatBroadcastTimer);
+	
+	// Get current timer rate (Sixteenth subdivision)
+	float TimerRate = TimerManager.GetTimerRate(BeatBroadcastTimer);
+	
 
+	// Remap TimerRemaining from [0, TimerRate] to [-1.0, +1.0]
+	// Formula: BeatPhase = ((TimerRemaining / TimerRate) * 2.0) - 1.0
+	// We should check for TimerRate > 0 to avoid division by zero, but it should never be zero in practice
+	// When TimerRemaining = 0 (just fired): BeatPhase = -1.0 (beat edge)
+	// When TimerRemaining = TimerRate/2 (halfway): BeatPhase = 0.0 (beat peak)
+	// When TimerRemaining = TimerRate (just started): BeatPhase = +1.0 (beat edge)
+	float BeatPhase = ((TimerRemaining / TimerRate) * 2.0f) - 1.0f;
+	
+	// Safety clamp to ensure range
+	BeatPhase = FMath::Clamp(BeatPhase, -1.0f, 1.0f);
+	
 	return BeatPhase;
 }
 
@@ -426,18 +481,36 @@ float UUniversalBeatSubsystem::EvaluateTimingCurve(float BeatPhase)
 
 float UUniversalBeatSubsystem::CheckBeatTimingInternal(FName LabelName, FGameplayTag InputTag)
 {
-	// T021: Internal timing check implementation
+	// T013: Internal timing check implementation with FPS warning
+	
+	// Static flag for one-time low FPS warning
+	static bool bLowFPSWarningLogged = false;
 	
 	// Handle null/empty label (FR-011a)
 	FName SafeLabelName = (LabelName.IsNone() || LabelName == NAME_None) 
 		? FName("Default") 
 		: LabelName;
 	
-	// Get current beat phase
+	// Check frame rate and log warning once if below 30 FPS
+	if (!bLowFPSWarningLogged && GetWorld())
+	{
+		float DeltaSeconds = GetWorld()->GetDeltaSeconds();
+		if (DeltaSeconds > 0.033f)  // 30 FPS threshold
+		{
+			UE_LOG(LogUniversalBeat, Warning, TEXT("Frame rate below 30 FPS detected (%.1f ms/frame). Timing accuracy may degrade below specification."),
+				DeltaSeconds * 1000.0f);
+			bLowFPSWarningLogged = true;
+		}
+	}
+	
+	// Get current beat phase (-1.0 to +1.0)
 	float BeatPhase = CalculateBeatPhase();
 	
+	// Apply abs() to get curve input (0.0 to 1.0)
+	float CurveInput = FMath::Abs(BeatPhase);
+	
 	// Evaluate timing value via curve
-	float TimingValue = EvaluateTimingCurve(BeatPhase);
+	float TimingValue = EvaluateTimingCurve(CurveInput);
 	
 	// Get current beat number for metadata
 	int32 BeatNumber = GetCurrentBeatNumber();
@@ -456,80 +529,81 @@ float UUniversalBeatSubsystem::CheckBeatTimingInternal(FName LabelName, FGamepla
 	// Broadcast event (Phase 5 - T026)
 	OnBeatInputCheck.Broadcast(SafeLabelName, InputTag, TimingValue);
 	
-	// Debug logging
+	// T026: Debug logging for timing check correlation
 	if (bDebugLoggingEnabled)
 	{
-		if (!SafeLabelName.IsNone())
-		{
-			UE_LOG(LogUniversalBeat, Log, TEXT("Timing Check [Label:%s] - Beat:%d Phase:%.3f Value:%.3f"), 
-				*SafeLabelName.ToString(), BeatNumber, BeatPhase, TimingValue);
-		}
-		else
-		{
-			UE_LOG(LogUniversalBeat, Log, TEXT("Timing Check [Tag:%s] - Beat:%d Phase:%.3f Value:%.3f"), 
-				*InputTag.ToString(), BeatNumber, BeatPhase, TimingValue);
-		}
+		float TimerRemaining = GetWorld() ? GetWorld()->GetTimerManager().GetTimerRemaining(BeatBroadcastTimer) : 0.0f;
+		
+		UE_LOG(LogUniversalBeat, Verbose, TEXT("Timing Check [Label:%s] - Beat #%d (TimerRemaining: %.6f, BeatPhase: %.3f, TimingValue: %.3f)"), 
+			*SafeLabelName.ToString(), BeatNumber, TimerRemaining, BeatPhase, TimingValue);
+	
 	}
 	
 	return TimingValue;
 }
 
-void UUniversalBeatSubsystem::RealignBeatTracking()
+void UUniversalBeatSubsystem::BroadcastBeatEvent()
 {
-	// T018: Periodic drift compensation (1 second intervals)
-	// Recalculate current beat number and phase from absolute StartTime
-	// This prevents unbounded drift over hours of gameplay
+	// T014: Beat broadcasting callback with BPM queuing and subdivision filtering
 	
-	if (!GetWorld())
+	// Increment tick counter
+	CurrentBeatTick++;
+	
+	// Check for pending BPM change at whole beat boundary (every InternalSubdivision = 16 ticks)
+	if (PendingBPM > 0.0f && (CurrentBeatTick % InternalSubdivision == 0))
+	{
+		if (bDebugLoggingEnabled)
+		{
+			UE_LOG(LogUniversalBeat, Log, TEXT("Applying queued BPM change: %.2f -> %.2f at tick %d"),
+				CurrentBPM, PendingBPM, CurrentBeatTick);
+		}
+		
+		// Apply pending BPM
+		CurrentBPM = PendingBPM;
+		PendingBPM = 0.0f;
+		OnBPMChanged.Broadcast(CurrentBPM);
+		// Recreate timer with new rate
+		RecreateTimerWithNewRate();
+		
+		// Return early - timer recreation will restart callbacks
+		return;
+	}
+	
+	// Check if broadcasting is enabled
+	if (!bBeatBroadcastingEnabled)
 	{
 		return;
 	}
 	
-	double CurrentTime = bRespectTimeDilation 
-		? GetWorld()->GetTimeSeconds() 
-		: GetWorld()->GetRealTimeSeconds();
+	// Get ticks per broadcast for current subdivision
+	int32 TicksPerBroadcast = GetTicksForSubdivision(CurrentSubdivision);
 	
-	double CalibrationOffsetSeconds = CalibrationOffsetMs / 1000.0;
-	double AdjustedTime = CurrentTime + CalibrationOffsetSeconds;
-	
-	double SecondsPerBeat = 60.0 / CurrentBPM;
-	double ElapsedBeats = (AdjustedTime - StartTime) / SecondsPerBeat;
-	
-	// Update cached beat number and phase (for reference)
-	int32 CurrentBeatNumber = FMath::FloorToInt(ElapsedBeats);
-	float CurrentBeatPhase = FMath::Frac(ElapsedBeats);
-	
-	if (bDebugLoggingEnabled)
+	// Check if we should broadcast on this tick
+	if (TicksPerBroadcast > 0 && (CurrentBeatTick % TicksPerBroadcast == 0))
 	{
-		UE_LOG(LogUniversalBeat, Verbose, TEXT("Drift compensation: Beat %d, Phase %.3f"), CurrentBeatNumber, CurrentBeatPhase);
-	}
-}
-
-void UUniversalBeatSubsystem::BroadcastBeatEvent()
-{
-	// T037: Broadcast beat event with metadata
-	int32 CurrentBeatNum = GetCurrentBeatNumber();
-	float CurrentPhase = GetCurrentBeatPhase();
-	
-	// Calculate subdivision index based on phase
-	float SubdivisionMultiplier = GetSubdivisionMultiplier(CurrentSubdivision);
-	int32 SubdivisionIndex = FMath::FloorToInt(CurrentPhase * SubdivisionMultiplier);
-	
-	// Create event data
-	FBeatEventData EventData;
-	EventData.BeatNumber = CurrentBeatNum;
-	EventData.SubdivisionIndex = SubdivisionIndex;
-	EventData.SubdivisionType = CurrentSubdivision;
-	EventData.EventTimestamp = FPlatformTime::Seconds();
-	
-	// Broadcast event
-	OnBeat.Broadcast(EventData);
-	
-	// Debug logging
-	if (bDebugLoggingEnabled)
-	{
-		UE_LOG(LogUniversalBeat, Verbose, TEXT("Beat Event - Beat:%d SubdivIdx:%d Type:%d Phase:%.3f"), 
-			CurrentBeatNum, SubdivisionIndex, (int32)CurrentSubdivision, CurrentPhase);
+		// Calculate subdivision index for event data
+		int32 SubdivisionIndex = CurrentBeatTick % GetSubdivisionMultiplier(CurrentSubdivision);
+		// Get current beat phase and number
+		float CurrentPhase = GetCurrentBeatPhase();
+		int32 CurrentBeatNum = GetCurrentBeatNumber();
+		
+		// Create event data
+		FBeatEventData EventData;
+		EventData.BeatNumber = CurrentBeatNum;
+		EventData.SubdivisionIndex = SubdivisionIndex;
+		EventData.SubdivisionType = CurrentSubdivision;
+		EventData.EventTimestamp = FPlatformTime::Seconds();
+		
+		// Broadcast event
+		OnBeat.Broadcast(EventData);
+		
+		// T026: Debug logging for synchronization validation
+		if (bDebugLoggingEnabled)
+		{
+			float TimerRemaining = GetWorld() ? GetWorld()->GetTimerManager().GetTimerRemaining(BeatBroadcastTimer) : 0.0f;
+			UE_LOG(LogUniversalBeat, Verbose, TEXT("Beat #%d fired (TimerRemaining: %.6f, BeatPhase: %.3f, Tick: %d, Subdivision: %d)"), 
+				CurrentBeatNum, TimerRemaining, CurrentPhase, CurrentBeatTick, (int32)CurrentSubdivision);
+		}
 	}
 }
 
@@ -588,16 +662,17 @@ void UUniversalBeatSubsystem::CompleteCalibrationSequence()
 	CalibrationTotalPrompts = 0;
 }
 
-float UUniversalBeatSubsystem::GetSubdivisionMultiplier(EBeatSubdivision Subdivision) const
+int UUniversalBeatSubsystem::GetSubdivisionMultiplier(EBeatSubdivision Subdivision) const
 {
 	// T034: Get subdivision multiplier for timer interval calculation
 	switch (Subdivision)
 	{
-		case EBeatSubdivision::None:    return 1.0f;
-		case EBeatSubdivision::Half:    return 2.0f;
-		case EBeatSubdivision::Quarter: return 4.0f;
-		case EBeatSubdivision::Eighth:  return 8.0f;
-		default: return 1.0f;
+		case EBeatSubdivision::None:    return 1;
+		case EBeatSubdivision::Half:    return 2;
+		case EBeatSubdivision::Quarter: return 4;
+		case EBeatSubdivision::Eighth:  return 8;
+		case EBeatSubdivision::Sixteenth:  return 16;
+		default: return 1;
 	}
 }
 
@@ -612,7 +687,7 @@ bool UUniversalBeatSubsystem::IsPausedState() const
 }
 
 // ====================================================================
-// Note Chart System Implementation (Stub implementations for Phase 2)
+// Note Chart System Implementation 
 // ====================================================================
 
 FNoteValidationResult UUniversalBeatSubsystem::CheckBeatTimingByTag(FGameplayTag InputTag)
