@@ -64,6 +64,11 @@ public:
 	/** USubsystem implementation */
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
+	/** End USubsystem implementation */
+
+	/** UWorldSubsystem interface */
+	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
+	/** End UWorldSubsystem interface */
 
 	// ====================================================================
 	// 1. BPM Configuration
@@ -115,6 +120,11 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "UniversalBeat|Configuration", meta = (Tooltip = "Check if beats follow time dilation."))
 	bool GetRespectTimeDilation() const;
+
+	// Pause Beat Timer
+	UFUNCTION(BlueprintCallable, Category = "UniversalBeat|Configuration", meta = (Tooltip = "Pause or unpause beat timer."))
+	void PauseBeatTimer(bool bPause);
+
 
 	// ====================================================================
 	// 2. Timing Checks
@@ -332,14 +342,6 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Songs", meta = (Tooltip = "Get currently playing song configuration."))
 	USongConfiguration* GetCurrentSong() const;
-
-	/**
-	 * Get the active track players for the current song.
-	 * 
-	 * @return Array of level sequence players for active tracks
-	 */
-	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UniversalBeat|Songs", meta = (Tooltip = "Get active level sequence players."))
-	TArray<ULevelSequencePlayer*> GetActiveTracks() const;
 
 	/**
 	 * Check if a song is currently playing.

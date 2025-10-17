@@ -36,12 +36,6 @@ void UUniversalBeatSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	CurrentNoteIndex = 0;
 	CachedSequenceFrameRate = FFrameRate(60, 1); // Default 60 FPS
 
-	// SongPlayer actor will be spawned when needed (lazy initialization)
-	EnsureSongPlayerActor();
-
-	// T009: Start Universal Beat Timer immediately at Sixteenth rate
-	RecreateTimerWithNewRate();
-
 	UE_LOG(LogUniversalBeat, Log, TEXT("UniversalBeatSubsystem initialized - BPM: %.1f, Timer started at Sixteenth rate"), CurrentBPM);
 }
 
@@ -71,6 +65,12 @@ void UUniversalBeatSubsystem::Deinitialize()
 	
 	Super::Deinitialize();
 	UE_LOG(LogUniversalBeat, Log, TEXT("UniversalBeatSubsystem deinitialized - Timer paused"));
+}
+
+void UUniversalBeatSubsystem::OnWorldBeginPlay(UWorld& InWorld)
+{
+	EnsureSongPlayerActor();
+	RecreateTimerWithNewRate();
 }
 
 // ====================================================================
@@ -138,6 +138,23 @@ bool UUniversalBeatSubsystem::GetRespectTimeDilation() const
 {
 	// T014: Get time dilation mode
 	return bRespectTimeDilation;
+}
+
+void UUniversalBeatSubsystem::PauseBeatTimer(bool bPause)
+{
+	if (UWorld* World = GetWorld())
+	{
+		FTimerManager& TimerManager = World->GetTimerManager();
+		
+		if (bPause)
+		{
+			TimerManager.PauseTimer(BeatBroadcastTimer);
+		}
+		else
+		{
+			TimerManager.UnPauseTimer(BeatBroadcastTimer);
+		}
+	}
 }
 
 // ====================================================================
@@ -527,6 +544,38 @@ void UUniversalBeatSubsystem::BroadcastBeatEvent()
 	// Increment tick counter
 	CurrentBeatTick++;
 	
+	if (CurrentTrackInfo.TrackSequence != nullptr)
+	{
+		
+		if (IsValid(SongPlayerActor))
+		{
+			ULevelSequencePlayer* Player = SongPlayerActor->GetSequencePlayer();
+			if (SongPlayerActor->LevelSequenceAsset != nullptr)
+			{
+				CurrentTrackInfo.TrackSequence.LoadSynchronous();
+				FFrameTime CurrentFrame = Player->GetCurrentTime().ConvertTo(FFrameRate(30, 1)).GetFrame();
+				FFrameTime NextFrame = CurrentFrame + FFrameTime(1);
+				FFrameTime EndFrame = Player->GetEndTime().ConvertTo(FFrameRate(30, 1)).GetFrame();
+				FMovieSceneSequencePlaybackSettings PlaybackSettings = SongPlayerActor->PlaybackSettings;
+				int LoopCount = PlaybackSettings.LoopCount.Value;
+				if (NextFrame >= EndFrame) {
+					NextFrame = Player->GetStartTime().ConvertTo(FFrameRate(30, 1)).GetFrame();
+					if (LoopCount > 0) {
+						SongPlayerActor->PlaybackSettings.LoopCount.Value = LoopCount - 1;
+					}
+					else {
+						Player->OnFinished.Broadcast();
+					}
+				}
+				else {
+					FMovieSceneSequencePlaybackParams PlaybackParams = FMovieSceneSequencePlaybackParams(NextFrame, EUpdatePositionMethod::Play);
+					Player->SetPlaybackPosition(PlaybackParams);
+					//Player->PlayTo(PlaybackParams, FMovieSceneSequencePlayToParams());
+				}
+			}
+		}
+	}
+
 	// Check for pending BPM change at whole beat boundary (every InternalSubdivision = 16 ticks)
 	if (PendingBPM > 0.0f && (CurrentBeatTick % InternalSubdivision == 0))
 	{
@@ -972,21 +1021,6 @@ USongConfiguration* UUniversalBeatSubsystem::GetCurrentSong() const
 	return CurrentlyPlayingSong;
 }
 
-TArray<ULevelSequencePlayer*> UUniversalBeatSubsystem::GetActiveTracks() const
-{
-	TArray<ULevelSequencePlayer*> Result;
-	// With sequential playback, return the single SongPlayer if a song is playing
-	if (CurrentlyPlayingSong)
-	{
-		ULevelSequencePlayer* Player = GetSongPlayer();
-		if (Player && Player->IsPlaying())
-		{
-			Result.Add(Player);
-		}
-	}
-	return Result;
-}
-
 bool UUniversalBeatSubsystem::IsPlayingSong() const
 {
 	if (!CurrentlyPlayingSong)
@@ -1144,6 +1178,8 @@ void UUniversalBeatSubsystem::OnTrackDelayComplete()
 	// Configure loop settings from CurrentTrackInfo
 	FMovieSceneSequencePlaybackSettings PlaybackSettings = SongPlayerActor->PlaybackSettings;
 	PlaybackSettings.LoopCount.Value = CurrentTrackInfo.LoopCount;
+	SongPlayerActor->PlaybackSettings = PlaybackSettings;
+
 	Player->SetPlaybackSettings(PlaybackSettings);
 
 	// Clear any previous finish bindings and bind our callback
@@ -1151,7 +1187,8 @@ void UUniversalBeatSubsystem::OnTrackDelayComplete()
 	Player->OnFinished.AddDynamic(this, &UUniversalBeatSubsystem::OnSongPlayerFinished);
 
 	// Start playback
-	Player->Play();
+	// We don't use this for sequential playback, we control playback manually
+	//Player->Play(); 
 
 	// Find track index for broadcasting (search in original song tracks)
 	int32 TrackIndex = 0;
@@ -1418,11 +1455,11 @@ bool UUniversalBeatSubsystem::PlayNoteChartSequence(ULevelSequence* Sequence)
 	}
 
 	// Start playback - get player from actor
-	ULevelSequencePlayer* Player = GetSongPlayer();
+	/*ULevelSequencePlayer* Player = GetSongPlayer();
 	if (Player)
 	{
 		Player->Play();
-	}
+	}*/
 
 	if (bDebugLoggingEnabled)
 	{
@@ -1438,7 +1475,7 @@ void UUniversalBeatSubsystem::StopNoteChartSequence()
 	ULevelSequencePlayer* Player = GetSongPlayer();
 	if (Player && Player->IsPlaying())
 	{
-		Player->Stop();
+		Player->GoToEndAndStop();
 	}
 
 	CurrentNoteChartSequence = nullptr;
@@ -1456,9 +1493,9 @@ bool UUniversalBeatSubsystem::IsPlayingNoteChart() const
 	{
 		return false;
 	}
-
-	ULevelSequencePlayer* Player = GetSongPlayer();
-	return Player && Player->IsPlaying();
+	return true; // return true for now due to we don't use playing logic
+	//ULevelSequencePlayer* Player = GetSongPlayer();
+	//return Player && Player->IsPlaying();
 }
 
 bool UUniversalBeatSubsystem::GetNextNoteForTag(FGameplayTag NoteTag, float CurrentTime, FNoteInstance& OutNote)
@@ -1547,7 +1584,7 @@ FFrameNumber UUniversalBeatSubsystem::SecondsToFrame(float Seconds) const
 float UUniversalBeatSubsystem::GetCurrentPlaybackTime() const
 {
 	ULevelSequencePlayer* Player = GetSongPlayer();
-	if (!Player || !Player->IsPlaying())
+	if (!Player)
 	{
 		// Fallback to real-time if no player active or not playing
 		return FPlatformTime::Seconds();
